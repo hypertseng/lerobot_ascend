@@ -463,9 +463,9 @@ def convert_dataset(
         revision=branch,
         repo_type="dataset",
     )
-    hub_api.create_tag(repo_id, tag=CODEBASE_VERSION, revision=branch, repo_type="dataset")
+    # hub_api.create_tag(repo_id, tag=CODEBASE_VERSION, revision=branch, repo_type="dataset")
 
-    LeRobotDataset(repo_id).push_to_hub()
+    # LeRobotDataset(repo_id).push_to_hub()
 
 
 if __name__ == "__main__":

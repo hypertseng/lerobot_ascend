@@ -27,6 +27,7 @@ from statistics import mean
 
 import numpy as np
 import torch
+import torch_npu
 
 
 def inside_slurm():
@@ -43,6 +44,9 @@ def auto_select_torch_device() -> torch.device:
     elif torch.backends.mps.is_available():
         logging.info("Metal backend detected, using mps.")
         return torch.device("mps")
+    elif torch.npu.is_available():
+        logging.info("NPU backend detected, using npu.")
+        return torch.device("npu")
     else:
         logging.warning("No accelerated backend detected. Using default cpu, this will be slow.")
         return torch.device("cpu")
@@ -59,6 +63,9 @@ def get_safe_torch_device(try_device: str, log: bool = False) -> torch.device:
         case "mps":
             assert torch.backends.mps.is_available()
             device = torch.device("mps")
+        case "npu":
+            assert torch.npu.is_available()
+            device = torch.device("npu")
         case "cpu":
             device = torch.device("cpu")
             if log:
@@ -84,16 +91,21 @@ def get_safe_dtype(dtype: torch.dtype, device: str | torch.device):
 
 
 def is_torch_device_available(try_device: str) -> bool:
-    try_device = str(try_device)  # Ensure try_device is a string
-    if try_device == "cuda":
+    try_device = str(try_device).lower()
+    if try_device.startswith("cuda"):
         return torch.cuda.is_available()
-    elif try_device == "mps":
+    elif try_device.startswith("mps"):
         return torch.backends.mps.is_available()
-    elif try_device == "cpu":
+    elif try_device.startswith("npu"):
+        return hasattr(torch, "npu") and torch.npu.is_available()
+    elif try_device.startswith("cpu"):
         return True
     else:
-        raise ValueError(f"Unknown device {try_device}. Supported devices are: cuda, mps or cpu.")
-
+        raise ValueError(
+            f"Unknown device {try_device}. Supported devices are: cuda, mps, npu or cpu."
+        )
+        
+        
 
 def is_amp_available(device: str):
     if device in ["cuda", "cpu"]:
