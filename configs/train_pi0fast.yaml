@@ -1,0 +1,39 @@
+dataset:
+  # repo_id: Jeongeun/omy_pnp_language # Repository ID
+  repo_id: lerobot/aloha_sim_transfer_cube_human
+  # root: /root/zzx/workspace/lerobot-mujoco-tutorial/demo_data_example # Your root for data file!
+
+policy:
+  type: pi0fast
+  chunk_size: 10
+  n_action_steps: 10
+
+  # device: npu  # 使用昇腾NPU
+  push_to_hub: false
+
+save_checkpoint: true
+output_dir: ./ckpt/pi0fast_aloha # Save directory
+batch_size: 8
+job_name: pi0fast_aloha
+resume: false 
+seed: 42
+num_workers: 16
+steps: 5000
+eval_freq: -1  # No evaluation during distributed training
+log_freq: 500  # 8卡训练减少日志频率
+save_checkpoint: true
+save_freq: 5_000
+use_policy_training_preset: true
+
+
+# 优化器配置
+optimizer:
+  lr: 1e-4
+  grad_clip_norm: 1.0
+  weight_decay: 1e-4
+
+wandb:
+  enable: true
+  project: pi0fast_aloha
+  entity: jeffreytseng123-chinese-academy-of-sciences
+  disable_artifact: true

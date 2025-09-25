@@ -62,7 +62,7 @@ from lerobot.utils.utils import (
 )
 from lerobot.configs import parser
 from lerobot.configs.train import TrainPipelineConfig
-from lerobot.scripts.eval import eval_policy_all
+from lerobot.scripts.lerobot_eval import eval_policy_all
 
 import wandb
 
