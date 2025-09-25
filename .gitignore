@@ -179,4 +179,4 @@ outputs/
 *.part
 
 
-./ckpt
+ckpt/*
