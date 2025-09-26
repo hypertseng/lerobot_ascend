@@ -180,3 +180,5 @@ outputs/
 
 
 ckpt/*
+kernel_mata/*
+eval_output/*
