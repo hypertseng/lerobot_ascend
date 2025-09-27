@@ -5,7 +5,6 @@ from contextlib import nullcontext
 from pprint import pformat
 from typing import Any
 import torch
-import torch_npu
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.utils.data.distributed import DistributedSampler
@@ -18,6 +17,23 @@ from lerobot.utils.utils import init_logging as _init_logging_at_import
 _init_logging_at_import()
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
+NPU_AVAILABLE = False
+try:
+    import torch_npu  # noqa: F401
+    try:
+        torch.npu.init()
+    except Exception as e:
+        logging.warning(f"torch.npu.init() 失败: {e}")
+    NPU_AVAILABLE = hasattr(torch, "npu") and torch.npu.is_available()
+    device_count = getattr(torch.npu, "device_count", lambda: "NA")()
+    _rank_env = int(os.environ.get("RANK", "0"))
+    if _rank_env == 0:
+        logging.info("NPU检测: available=%s, device_count=%s", NPU_AVAILABLE, device_count)
+        logging.info("昇腾NPU支持已启用" if NPU_AVAILABLE else "NPU不可用，回退CPU")
+except ImportError:
+    if int(os.environ.get("RANK", "0")) == 0:
+        logging.warning("未安装torch_npu，将使用CPU训练")
 
 from lerobot.datasets.factory import make_dataset
 from lerobot.datasets.sampler import EpisodeAwareSampler
@@ -375,7 +391,7 @@ def train(cfg: TrainPipelineConfig):
         if is_eval_step and cfg.env and rank == 0:
             step_id = get_step_identifier(step, cfg.steps)
             with torch.no_grad(), (
-                torch.npu.amp.autocast() if NPU_AVAILABLE and device.type == "npu" and use_amp else nullcontext()
+                torch.npu.amp.autocast() if NPU_AVAILABLE and device.type == "npu" and cfg.policy.use_amp else nullcontext()
             ):
                 eval_info = eval_policy_all(
                     envs=eval_env,  # dict[suite][task_id] -> vec_env
