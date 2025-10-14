@@ -248,29 +248,36 @@ def train(cfg: TrainPipelineConfig):
         policy = DDP(policy, device_ids=[local_rank] if device.type != "cpu" else None,
                     find_unused_parameters=True)
         dist.barrier(device_ids=[local_rank] if device.type != "cpu" else None)
-        
-    
+
     # Create processors - only provide dataset_stats if not resuming from saved processors
     processor_kwargs = {}
     postprocessor_kwargs = {}
     if (cfg.policy.pretrained_path and not cfg.resume) or not cfg.policy.pretrained_path:
         # Only provide dataset_stats when not resuming from saved processor state
         processor_kwargs["dataset_stats"] = dataset.meta.stats
-        
+
+    if hasattr(policy, "module"):
+        policy_config = policy.module.config
+    else:
+        policy_config = policy.config
+
     if cfg.policy.pretrained_path is not None:
         processor_kwargs["preprocessor_overrides"] = {
             "device_processor": {"device": device.type},
             "normalizer_processor": {
                 "stats": dataset.meta.stats,
-                "features": {**policy.module.config.input_features, **policy.module.config.output_features},
-                "norm_map": policy.module.config.normalization_mapping,
+                "features": {
+                    **policy_config.input_features,
+                    **policy_config.output_features,
+                },
+                "norm_map": policy_config.normalization_mapping,
             },
         }
         postprocessor_kwargs["postprocessor_overrides"] = {
             "unnormalizer_processor": {
                 "stats": dataset.meta.stats,
-                "features": policy.module.config.output_features,
-                "norm_map": policy.module.config.normalization_mapping,
+                "features": policy_config.output_features,
+                "norm_map": policy_config.normalization_mapping,
             },
         }
 
