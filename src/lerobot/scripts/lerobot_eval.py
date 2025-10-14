@@ -61,8 +61,8 @@ from pathlib import Path
 from pprint import pformat
 from typing import Any, TypedDict
 import torch
-# import torch_npu
-from torch_npu.contrib import transfer_to_npu
+import torch_npu
+# from torch_npu.contrib import transfer_to_npu
 device = "npu:0"
 torch.npu.set_device(device)  # 必须在import gymnasium之前设置，仿真环境可能跟NPU底层有冲突
 import einops

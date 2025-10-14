@@ -177,3 +177,6 @@ outputs/
 *.urdf
 *.xml
 *.part
+ckpt/*
+kernel_meta/*
+torch_compile_debug/*
