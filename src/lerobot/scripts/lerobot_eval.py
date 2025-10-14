@@ -60,11 +60,14 @@ from functools import partial
 from pathlib import Path
 from pprint import pformat
 from typing import Any, TypedDict
-
+import torch
+# import torch_npu
+from torch_npu.contrib import transfer_to_npu
+device = "npu:0"
+torch.npu.set_device(device)  # 必须在import gymnasium之前设置，仿真环境可能跟NPU底层有冲突
 import einops
 import gymnasium as gym
 import numpy as np
-import torch
 from termcolor import colored
 from torch import Tensor, nn
 from tqdm import trange
@@ -166,6 +169,7 @@ def rollout(
         # TODO: works with SyncVectorEnv but not AsyncVectorEnv
         observation = add_envs_task(env, observation)
         observation = preprocessor(observation)
+
         with torch.inference_mode():
             action = policy.select_action(observation)
         action = postprocessor(action)
@@ -477,26 +481,23 @@ def _compile_episode_data(
 @parser.wrap()
 def eval_main(cfg: EvalPipelineConfig):
     logging.info(pformat(asdict(cfg)))
-
-    # Check device is available
+    
     device = get_safe_torch_device(cfg.policy.device, log=True)
 
-    torch.backends.cudnn.benchmark = True
-    torch.backends.cuda.matmul.allow_tf32 = True
     set_seed(cfg.seed)
 
     logging.info(colored("Output dir:", "yellow", attrs=["bold"]) + f" {cfg.output_dir}")
-
+    
     logging.info("Making environment.")
     envs = make_env(cfg.env, n_envs=cfg.eval.batch_size, use_async_envs=cfg.eval.use_async_envs)
 
     logging.info("Making policy.")
-
+    
     policy = make_policy(
         cfg=cfg.policy,
         env_cfg=cfg.env,
     )
-
+        
     policy.eval()
     preprocessor, postprocessor = make_pre_post_processors(
         policy_cfg=cfg.policy,
@@ -504,6 +505,7 @@ def eval_main(cfg: EvalPipelineConfig):
         # The inference device is automatically set to match the detected hardware, overriding any previous device settings from training to ensure compatibility.
         preprocessor_overrides={"device_processor": {"device": str(policy.config.device)}},
     )
+
     with torch.no_grad(), torch.autocast(device_type=device.type) if cfg.policy.use_amp else nullcontext():
         info = eval_policy_all(
             envs=envs,
@@ -526,12 +528,13 @@ def eval_main(cfg: EvalPipelineConfig):
     # Close all vec envs
     close_envs(envs)
 
+
     # Save info
     with open(Path(cfg.output_dir) / "eval_info.json", "w") as f:
         json.dump(info, f, indent=2)
 
     logging.info("End of eval")
-
+    
 
 # ---- typed payload returned by one task eval ----
 class TaskMetrics(TypedDict):
@@ -743,6 +746,7 @@ def eval_policy_all(
         "per_group": groups_aggregated,
         "overall": overall_agg,
     }
+
 
 
 def main():

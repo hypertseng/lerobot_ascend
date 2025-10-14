@@ -60,6 +60,9 @@ def get_safe_torch_device(try_device: str, log: bool = False) -> torch.device:
         case "mps":
             assert torch.backends.mps.is_available()
             device = torch.device("mps")
+        case "npu":
+            assert torch.npu.is_available()
+            device = torch.device("npu")
         case "cpu":
             device = torch.device("cpu")
             if log:
@@ -90,9 +93,11 @@ def is_torch_device_available(try_device: str) -> bool:
         return torch.cuda.is_available()
     elif try_device == "mps":
         return torch.backends.mps.is_available()
+    elif try_device == "npu":
+        return torch.npu.is_available()
     elif try_device == "cpu":
         return True
-    else:
+    else: 
         raise ValueError(f"Unknown device {try_device}. Supported devices are: cuda, mps or cpu.")
 
 

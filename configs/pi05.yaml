@@ -1,0 +1,38 @@
+dataset:
+  # repo_id: lerobot/aloha_sim_transfer_cube_human
+  # repo_id: lerobot/pusht
+  repo_id: HuggingFaceVLA/libero
+
+
+policy:
+  type: pi05
+  # chunk_size: 10
+  # n_action_steps: 10
+
+  device: npu
+  push_to_hub: false
+  dtype: bfloat16
+  gradient_checkpointing: true
+  pretrained_path: lerobot/pi05_base
+  compile_model: true
+
+save_checkpoint: true
+output_dir: ./ckpt/pi05_libero
+batch_size: 8
+job_name: pi05_libero
+resume: false
+seed: 42
+num_workers: 16
+steps: 60000
+eval_freq: -1  # No evaluation during distributed training
+log_freq: 500  # 8卡训练减少日志频率
+save_checkpoint: true
+save_freq: 5_000
+use_policy_training_preset: true
+
+wandb:
+  enable: true
+
+  project: pi05_libero
+  entity: jeffreytseng123-chinese-academy-of-sciences
+  disable_artifact: true

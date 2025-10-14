@@ -1,31 +1,43 @@
-#!/usr/bin/env python
-
-# Copyright 2024 The HuggingFace Inc. team. All rights reserved.
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-#     http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 import logging
 import time
+import os
 from contextlib import nullcontext
 from pprint import pformat
 from typing import Any
-
 import torch
-from termcolor import colored
+import torch.distributed as dist
+from torch.nn.parallel import DistributedDataParallel as DDP
+from torch.utils.data.distributed import DistributedSampler
 from torch.amp import GradScaler
 from torch.optim import Optimizer
+from termcolor import colored
 
-from lerobot.configs import parser
-from lerobot.configs.train import TrainPipelineConfig
+# 提前初始化日志
+from lerobot.utils.utils import init_logging as _init_logging_at_import
+_init_logging_at_import()
+
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
+NPU_AVAILABLE = False
+try:
+    import torch_npu
+    from torch_npu.contrib import transfer_to_npu
+    device = "npu:0"
+    torch.npu.set_device(device)
+    try:
+        torch.npu.init()
+    except Exception as e:
+        logging.warning(f"torch.npu.init() 失败: {e}")
+    NPU_AVAILABLE = hasattr(torch, "npu") and torch.npu.is_available()
+    device_count = getattr(torch.npu, "device_count", lambda: "NA")()
+    _rank_env = int(os.environ.get("RANK", "0"))
+    if _rank_env == 0:
+        logging.info("NPU检测: available=%s, device_count=%s", NPU_AVAILABLE, device_count)
+        logging.info("昇腾NPU支持已启用" if NPU_AVAILABLE else "NPU不可用，回退CPU")
+except ImportError:
+    if int(os.environ.get("RANK", "0")) == 0:
+        logging.warning("未安装torch_npu，将使用CPU训练")
+
 from lerobot.datasets.factory import make_dataset
 from lerobot.datasets.sampler import EpisodeAwareSampler
 from lerobot.datasets.utils import cycle
@@ -36,7 +48,6 @@ from lerobot.policies.factory import make_policy, make_pre_post_processors
 from lerobot.policies.pretrained import PreTrainedPolicy
 from lerobot.policies.utils import get_device_from_parameters
 from lerobot.rl.wandb_utils import WandBLogger
-from lerobot.scripts.lerobot_eval import eval_policy_all
 from lerobot.utils.logging_utils import AverageMeter, MetricsTracker
 from lerobot.utils.random_utils import set_seed
 from lerobot.utils.train_utils import (
@@ -48,12 +59,55 @@ from lerobot.utils.train_utils import (
 )
 from lerobot.utils.utils import (
     format_big_number,
-    get_safe_torch_device,
     has_method,
     init_logging,
 )
+from lerobot.configs import parser
+from lerobot.configs.train import TrainPipelineConfig
+from lerobot.scripts.lerobot_eval import eval_policy_all
 
+import wandb
 
+import datasets.features.features as features
+_OLD_GENERATE_FROM_DICT = features.generate_from_dict
+def _new_generate_from_dict(obj):
+    if isinstance(obj, dict) and obj.get("_type") == "List":
+        obj["_type"] = "Sequence"
+    return _OLD_GENERATE_FROM_DICT(obj)
+features.generate_from_dict = _new_generate_from_dict
+
+# ---------------- 分布式初始化 ----------------
+def setup_distributed():
+    """设置分布式训练环境"""
+    if "RANK" in os.environ and "WORLD_SIZE" in os.environ:
+        rank = int(os.environ["RANK"])
+        world_size = int(os.environ["WORLD_SIZE"])
+        local_rank = int(os.environ["LOCAL_RANK"])
+        if NPU_AVAILABLE:
+            backend = "hccl"
+            torch.npu.set_device(local_rank)
+            device = torch.device(f"npu:{local_rank}")
+        else:
+            backend = "gloo"
+            device = torch.device("cpu")
+
+        dist.init_process_group(
+            backend=backend,
+            init_method="env://",
+            world_size=world_size,
+            rank=rank,
+        )
+        return rank, world_size, local_rank, device
+    else:
+        # 单进程训练
+        device = torch.device("cuda:0" if torch.cuda.is_available() else "npu:0" if NPU_AVAILABLE else "cpu")
+        return 0, 1, 0, device
+
+def cleanup_distributed():
+    if dist.is_initialized():
+        dist.destroy_process_group()
+
+# ---------------- Policy更新 ----------------
 def update_policy(
     train_metrics: MetricsTracker,
     policy: PreTrainedPolicy,
@@ -90,35 +144,33 @@ def update_policy(
     start_time = time.perf_counter()
     device = get_device_from_parameters(policy)
     policy.train()
-    with torch.autocast(device_type=device.type) if use_amp else nullcontext():
-        loss, output_dict = policy.forward(batch)
-        # TODO(rcadene): policy.unnormalize_outputs(out_dict)
-    grad_scaler.scale(loss).backward()
 
-    # Unscale the gradient of the optimizer's assigned params in-place **prior to gradient clipping**.
+    # forward
+    if use_amp:
+        if NPU_AVAILABLE and device.type == "npu":
+            with torch.npu.amp.autocast():
+                loss, output_dict = policy.forward(batch)
+        else:
+            loss, output_dict = policy.forward(batch)
+    else:
+        loss, output_dict = policy.forward(batch)
+
+    grad_scaler.scale(loss).backward()
     grad_scaler.unscale_(optimizer)
 
     grad_norm = torch.nn.utils.clip_grad_norm_(
-        policy.parameters(),
-        grad_clip_norm,
-        error_if_nonfinite=False,
+        policy.parameters(), grad_clip_norm, error_if_nonfinite=False
     )
 
-    # Optimizer's gradients are already unscaled, so scaler.step does not unscale them,
-    # although it still skips optimizer.step() if the gradients contain infs or NaNs.
     with lock if lock is not None else nullcontext():
         grad_scaler.step(optimizer)
-    # Updates the scale for next iteration.
     grad_scaler.update()
-
     optimizer.zero_grad()
 
-    # Step through pytorch scheduler at every batch instead of epoch
     if lr_scheduler is not None:
         lr_scheduler.step()
 
     if has_method(policy, "update"):
-        # To possibly update an internal buffer (for instance an Exponential Moving Average like in TDMPC).
         policy.update()
 
     train_metrics.loss = loss.item()
@@ -127,7 +179,7 @@ def update_policy(
     train_metrics.update_s = time.perf_counter() - start_time
     return train_metrics, output_dict
 
-
+# ---------------- 训练主函数 ----------------
 @parser.wrap()
 def train(cfg: TrainPipelineConfig):
     """
@@ -144,47 +196,60 @@ def train(cfg: TrainPipelineConfig):
     Args:
         cfg: A `TrainPipelineConfig` object containing all training configurations.
     """
-    cfg.validate()
-    logging.info(pformat(cfg.to_dict()))
+    rank, world_size, local_rank, device = setup_distributed()
 
-    if cfg.wandb.enable and cfg.wandb.project:
+    cfg.validate()
+    if world_size > 1:
+        barrier_device_ids = [local_rank] if device.type != "cpu" else None
+        dist.barrier(device_ids=barrier_device_ids)
+
+    if rank == 0:
+        logging.info(pformat(cfg.to_dict()))
+        logging.info(f"分布式训练配置: rank={rank}, world_size={world_size}, local_rank={local_rank}")
+
+    # WandB
+    if cfg.wandb.enable and cfg.wandb.project and rank == 0:
         wandb_logger = WandBLogger(cfg)
     else:
         wandb_logger = None
-        logging.info(colored("Logs will be saved locally.", "yellow", attrs=["bold"]))
+        if rank == 0:
+            logging.info(colored("Logs will be saved locally.", "yellow", attrs=["bold"]))
 
     if cfg.seed is not None:
-        set_seed(cfg.seed)
+        set_seed(cfg.seed + rank)
 
-    # Check device is available
-    device = get_safe_torch_device(cfg.policy.device, log=True)
-    torch.backends.cudnn.benchmark = True
-    torch.backends.cuda.matmul.allow_tf32 = True
-
-    logging.info("Creating dataset")
+    # 数据集
+    if rank == 0:
+        logging.info("Creating dataset")
     dataset = make_dataset(cfg)
 
-    # Create environment used for evaluating checkpoints during training on simulation data.
-    # On real-world data, no need to create an environment as evaluations are done outside train.py,
-    # using the eval.py instead, with gym_dora environment and dora-rs.
+    # eval env
     eval_env = None
-    if cfg.eval_freq > 0 and cfg.env is not None:
-        logging.info("Creating env")
+    if cfg.eval_freq > 0 and cfg.env and rank == 0:
+        logging.info("Creating eval env")
         eval_env = make_env(cfg.env, n_envs=cfg.eval.batch_size, use_async_envs=cfg.eval.use_async_envs)
 
-    logging.info("Creating policy")
-    policy = make_policy(
-        cfg=cfg.policy,
-        ds_meta=dataset.meta,
-    )
+    # 策略
+    if rank == 0:
+        logging.info("Creating policy")
+    cfg.policy.device = str(device)
+    policy = make_policy(cfg.policy, dataset.meta)
+    policy = policy.to(device)
 
+    # DDP包装
+    if world_size > 1:
+        policy = DDP(policy, device_ids=[local_rank] if device.type != "cpu" else None,
+                    find_unused_parameters=True)
+        dist.barrier(device_ids=[local_rank] if device.type != "cpu" else None)
+        
+    
     # Create processors - only provide dataset_stats if not resuming from saved processors
     processor_kwargs = {}
     postprocessor_kwargs = {}
     if (cfg.policy.pretrained_path and not cfg.resume) or not cfg.policy.pretrained_path:
         # Only provide dataset_stats when not resuming from saved processor state
         processor_kwargs["dataset_stats"] = dataset.meta.stats
-
+        
     if cfg.policy.pretrained_path is not None:
         processor_kwargs["preprocessor_overrides"] = {
             "device_processor": {"device": device.type},
@@ -209,39 +274,73 @@ def train(cfg: TrainPipelineConfig):
         **postprocessor_kwargs,
     )
 
-    logging.info("Creating optimizer and scheduler")
-    optimizer, lr_scheduler = make_optimizer_and_scheduler(cfg, policy)
-    grad_scaler = GradScaler(device.type, enabled=cfg.policy.use_amp)
+    # 优化器 & scheduler
+    if rank == 0:
+        logging.info("Creating optimizer and scheduler")
 
-    step = 0  # number of policy updates (forward + backward + optim)
+    # # >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
+    # # 如果 cfg.optimizer 为 None，设置默认值（兼容原逻辑）
+    # if cfg.optimizer is None:
+    #     from dataclasses import dataclass
 
+    #     @dataclass
+    #     class DefaultOptimizerConfig:
+    #         name: str = "adamw"
+    #         lr: float = 1e-4
+    #         weight_decay: float = 0.01
+    #         betas: tuple = (0.9, 0.95)
+    #         grad_clip_norm: float = 1.0
+
+    #         def build(self, params):
+    #             if self.name == "adamw":
+    #                 import torch.optim as optim
+    #                 return optim.AdamW(params, lr=self.lr, weight_decay=self.weight_decay, betas=self.betas)
+    #             else:
+    #                 raise ValueError(f"Unsupported optimizer: {self.name}")
+
+    #     cfg.optimizer = DefaultOptimizerConfig()
+    #     if rank == 0:
+    #         logging.warning(
+    #             colored("cfg.optimizer was None, using default AdamW optimizer.", "yellow")
+    #         )
+    # # <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
+
+    base_policy = policy.module if hasattr(policy, "module") else policy
+    optimizer, lr_scheduler = make_optimizer_and_scheduler(cfg, base_policy)
+
+    # GradScaler
+    if NPU_AVAILABLE and device.type == "npu":
+        grad_scaler = torch_npu.npu.amp.GradScaler(device.type, enabled=cfg.policy.use_amp)
+    else:
+        grad_scaler = GradScaler(device.type, enabled=cfg.policy.use_amp)
+
+    # 恢复训练状态
+    step = 0
     if cfg.resume:
         step, optimizer, lr_scheduler = load_training_state(cfg.checkpoint_path, optimizer, lr_scheduler)
 
-    num_learnable_params = sum(p.numel() for p in policy.parameters() if p.requires_grad)
-    num_total_params = sum(p.numel() for p in policy.parameters())
-
-    logging.info(colored("Output dir:", "yellow", attrs=["bold"]) + f" {cfg.output_dir}")
-    if cfg.env is not None:
-        logging.info(f"{cfg.env.task=}")
-    logging.info(f"{cfg.steps=} ({format_big_number(cfg.steps)})")
-    logging.info(f"{dataset.num_frames=} ({format_big_number(dataset.num_frames)})")
-    logging.info(f"{dataset.num_episodes=}")
-    logging.info(f"{num_learnable_params=} ({format_big_number(num_learnable_params)})")
-    logging.info(f"{num_total_params=} ({format_big_number(num_total_params)})")
-
-    # create dataloader for offline training
-    if hasattr(cfg.policy, "drop_n_last_frames"):
-        shuffle = False
-        sampler = EpisodeAwareSampler(
+    # dataloader
+    base_sampler = None
+    shuffle = True
+    if hasattr(cfg.policy, "drop_n_last_frames") and world_size == 1:
+        base_sampler = EpisodeAwareSampler(
             dataset.meta.episodes["dataset_from_index"],
             dataset.meta.episodes["dataset_to_index"],
             drop_n_last_frames=cfg.policy.drop_n_last_frames,
             shuffle=True,
         )
+        shuffle = False
+
+    if world_size > 1:
+        sampler = DistributedSampler(
+            dataset,
+            num_replicas=world_size,
+            rank=rank,
+            shuffle=True and base_sampler is None
+        )
+        shuffle = False
     else:
-        shuffle = True
-        sampler = None
+        sampler = base_sampler
 
     dataloader = torch.utils.data.DataLoader(
         dataset,
@@ -249,14 +348,13 @@ def train(cfg: TrainPipelineConfig):
         batch_size=cfg.batch_size,
         shuffle=shuffle and not cfg.dataset.streaming,
         sampler=sampler,
-        pin_memory=device.type == "cuda",
         drop_last=False,
+        persistent_workers=True if cfg.num_workers > 0 else False,
         prefetch_factor=2,
     )
     dl_iter = cycle(dataloader)
 
-    policy.train()
-
+    # Metrics
     train_metrics = {
         "loss": AverageMeter("loss", ":.3f"),
         "grad_norm": AverageMeter("grdn", ":.3f"),
@@ -264,38 +362,38 @@ def train(cfg: TrainPipelineConfig):
         "update_s": AverageMeter("updt_s", ":.3f"),
         "dataloading_s": AverageMeter("data_s", ":.3f"),
     }
+    train_tracker = MetricsTracker(cfg.batch_size, dataset.num_frames, dataset.num_episodes, train_metrics, initial_step=step)
 
-    train_tracker = MetricsTracker(
-        cfg.batch_size, dataset.num_frames, dataset.num_episodes, train_metrics, initial_step=step
-    )
+    if rank == 0:
+        from tqdm import tqdm
+        progress_bar = tqdm(range(step, cfg.steps), desc="Training", ncols=100)
 
-    logging.info("Start offline training on a fixed dataset")
-    for _ in range(step, cfg.steps):
+    # ---------------- 训练循环 ----------------
+    for step_idx in range(step, cfg.steps):
         start_time = time.perf_counter()
         batch = next(dl_iter)
         batch = preprocessor(batch)
         train_tracker.dataloading_s = time.perf_counter() - start_time
 
         train_tracker, output_dict = update_policy(
-            train_tracker,
-            policy,
-            batch,
-            optimizer,
-            cfg.optimizer.grad_clip_norm,
-            grad_scaler=grad_scaler,
-            lr_scheduler=lr_scheduler,
-            use_amp=cfg.policy.use_amp,
+            train_tracker, policy, batch, optimizer, cfg.optimizer.grad_clip_norm, grad_scaler, lr_scheduler, use_amp=cfg.policy.use_amp
         )
-
-        # Note: eval and checkpoint happens *after* the `step`th training update has completed, so we
-        # increment `step` here.
         step += 1
         train_tracker.step()
+
+        if rank == 0:
+            progress_bar.set_postfix({
+                "loss": f"{train_tracker.loss.val:.3f}",
+                "grad": f"{train_tracker.grad_norm.val:.2f}",
+                "lr": f"{train_tracker.lr.val:.2e}",
+            })
+            progress_bar.update(1)
+
         is_log_step = cfg.log_freq > 0 and step % cfg.log_freq == 0
         is_saving_step = step % cfg.save_freq == 0 or step == cfg.steps
         is_eval_step = cfg.eval_freq > 0 and step % cfg.eval_freq == 0
 
-        if is_log_step:
+        if is_log_step and rank == 0:
             logging.info(train_tracker)
             if wandb_logger:
                 wandb_log_dict = train_tracker.to_dict()
@@ -304,22 +402,20 @@ def train(cfg: TrainPipelineConfig):
                 wandb_logger.log_dict(wandb_log_dict, step)
             train_tracker.reset_averages()
 
-        if cfg.save_checkpoint and is_saving_step:
-            logging.info(f"Checkpoint policy after step {step}")
+        if is_saving_step and cfg.save_checkpoint and rank == 0:
             checkpoint_dir = get_step_checkpoint_dir(cfg.output_dir, cfg.steps, step)
+            save_policy = policy.module if isinstance(policy, DDP) else policy
             save_checkpoint(
-                checkpoint_dir, step, cfg, policy, optimizer, lr_scheduler, preprocessor, postprocessor
+                checkpoint_dir, step, cfg, save_policy, optimizer, lr_scheduler, preprocessor, postprocessor
             )
             update_last_checkpoint(checkpoint_dir)
             if wandb_logger:
                 wandb_logger.log_policy(checkpoint_dir)
 
-        if cfg.env and is_eval_step:
+        if is_eval_step and cfg.env and rank == 0:
             step_id = get_step_identifier(step, cfg.steps)
-            logging.info(f"Eval policy at step {step}")
-            with (
-                torch.no_grad(),
-                torch.autocast(device_type=device.type) if cfg.policy.use_amp else nullcontext(),
+            with torch.no_grad(), (
+                torch.npu.amp.autocast() if NPU_AVAILABLE and device.type == "npu" and cfg.policy.use_amp else nullcontext()
             ):
                 eval_info = eval_policy_all(
                     envs=eval_env,  # dict[suite][task_id] -> vec_env
@@ -345,9 +441,7 @@ def train(cfg: TrainPipelineConfig):
                 "pc_success": AverageMeter("success", ":.1f"),
                 "eval_s": AverageMeter("eval_s", ":.3f"),
             }
-            eval_tracker = MetricsTracker(
-                cfg.batch_size, dataset.num_frames, dataset.num_episodes, eval_metrics, initial_step=step
-            )
+            eval_tracker = MetricsTracker(cfg.batch_size, dataset.num_frames, dataset.num_episodes, eval_metrics, initial_step=step)
             eval_tracker.eval_s = aggregated.pop("eval_s")
             eval_tracker.avg_sum_reward = aggregated.pop("avg_sum_reward")
             eval_tracker.pc_success = aggregated.pop("pc_success")
@@ -359,6 +453,8 @@ def train(cfg: TrainPipelineConfig):
     if eval_env:
         close_envs(eval_env)
     logging.info("End of training")
+
+    cleanup_distributed()
 
     if cfg.policy.push_to_hub:
         policy.push_model_to_hub(cfg)

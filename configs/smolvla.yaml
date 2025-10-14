@@ -1,0 +1,44 @@
+dataset:
+  # repo_id: lerobot/aloha_sim_transfer_cube_human # Repository ID
+  # repo_id: Jeongeun/omy_pnp_language
+  repo_id: HuggingFaceVLA/libero
+  # repo_id: jadechoghari/smol-libero3
+  # root: /root/zzx/workspace/lerobot-mujoco-tutorial/demo_data_example
+
+policy:
+  type : smolvla
+  # chunk_size: 10
+  # n_action_steps: 10
+  # device: npu
+  push_to_hub: false
+
+env:
+  type: libero
+  task: libero_object
+  
+save_checkpoint: true
+# output_dir: ./ckpt/smolvla_aloha # Save directory
+# output_dir: ./ckpt/smolvla_omy_pnp_language # Save directory
+# output_dir: ./ckpt/smolvla_pusht
+output_dir: ./ckpt/smolvla_libero
+# job_name : smolvla_aloha
+# job_name : smolvla_omy_pnp_language
+job_name : smolvla_libero
+batch_size: 64
+resume: false
+seed : 42
+num_workers: 16
+steps: 20_000
+eval_freq: -1
+log_freq: 1000
+save_checkpoint: true
+save_freq: 5000
+use_policy_training_preset: true
+  
+wandb:
+  enable: true
+  # project: smolvla_aloha
+  # project: smolvla_omy_pnp_language
+  project: smolvla_libero
+  entity: jeffreytseng123-chinese-academy-of-sciences
+  disable_artifact: true

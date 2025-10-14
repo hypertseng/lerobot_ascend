@@ -577,14 +577,14 @@ tomli==2.2.1
     #   cmeel
     #   coverage
     #   pytest
-torch==2.7.1
+torch==2.6.0
     # via
     #   accelerate
     #   lerobot
     #   torchvision
 torchcodec==0.5
     # via lerobot
-torchvision==0.22.1
+torchvision==0.21.0
     # via lerobot
 tornado==6.5.1
     # via meshcat

@@ -1,0 +1,39 @@
+dataset:
+  # repo_id: lerobot/aloha_sim_transfer_cube_human
+  # repo_id: lerobot/pusht
+  repo_id: HuggingFaceVLA/libero
+
+policy:
+  type: pi0
+  # chunk_size: 10
+  # n_action_steps: 10
+
+  # device: npu  # 使用昇腾NPU
+  push_to_hub: false
+
+save_checkpoint: true
+# output_dir: ./ckpt/pi0_aloha # Save directory
+# output_dir: ./ckpt/pi0_pusht
+output_dir: ./ckpt/pi0_libero
+batch_size: 8
+# job_name: pi0_aloha
+# job_name: pi0_pusht
+job_name: pi0_libero
+resume: false
+seed: 42
+num_workers: 16
+steps: 20000
+eval_freq: -1  # No evaluation during distributed training
+log_freq: 500  # 8卡训练减少日志频率
+save_checkpoint: true
+save_freq: 5_000
+use_policy_training_preset: true
+# checkpoint_path: ./ckpt/pi0_pusht/checkpoints/last/pretrained_model
+
+wandb:
+  enable: true
+  # project: pi0_aloha
+  # project: pi0_pusht
+  project: pi0_libero
+  entity: jeffreytseng123-chinese-academy-of-sciences
+  disable_artifact: true
