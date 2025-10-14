@@ -18,25 +18,6 @@ _init_logging_at_import()
 
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
-NPU_AVAILABLE = False
-try:
-    import torch_npu
-    from torch_npu.contrib import transfer_to_npu
-    device = "npu:0"
-    torch.npu.set_device(device)
-    try:
-        torch.npu.init()
-    except Exception as e:
-        logging.warning(f"torch.npu.init() 失败: {e}")
-    NPU_AVAILABLE = hasattr(torch, "npu") and torch.npu.is_available()
-    device_count = getattr(torch.npu, "device_count", lambda: "NA")()
-    _rank_env = int(os.environ.get("RANK", "0"))
-    if _rank_env == 0:
-        logging.info("NPU检测: available=%s, device_count=%s", NPU_AVAILABLE, device_count)
-        logging.info("昇腾NPU支持已启用" if NPU_AVAILABLE else "NPU不可用，回退CPU")
-except ImportError:
-    if int(os.environ.get("RANK", "0")) == 0:
-        logging.warning("未安装torch_npu，将使用CPU训练")
 
 from lerobot.datasets.factory import make_dataset
 from lerobot.datasets.sampler import EpisodeAwareSampler
@@ -76,18 +57,36 @@ def _new_generate_from_dict(obj):
     return _OLD_GENERATE_FROM_DICT(obj)
 features.generate_from_dict = _new_generate_from_dict
 
-# ---------------- 分布式初始化 ----------------
+# ---------------- 设备与分布式初始化 ----------------
+def detect_device():
+    if torch.cuda.is_available():
+        return "cuda"
+    elif hasattr(torch, "npu") and torch.npu.is_available():
+        import torch_npu
+        from torch_npu.contrib import transfer_to_npu
+        device = "npu:0"
+        torch.npu.set_device(device)
+        return "npu"
+    else:
+        return "cpu"
+
 def setup_distributed():
-    """设置分布式训练环境"""
+    """设置分布式训练环境，兼容 GPU (nccl) 和 NPU (hccl)"""
+    device_type = detect_device()
     if "RANK" in os.environ and "WORLD_SIZE" in os.environ:
         rank = int(os.environ["RANK"])
         world_size = int(os.environ["WORLD_SIZE"])
         local_rank = int(os.environ["LOCAL_RANK"])
-        if NPU_AVAILABLE:
+
+        if device_type == "cuda":
+            backend = "nccl"
+            torch.cuda.set_device(local_rank)
+            device = torch.device(f"cuda:{local_rank}")
+        elif device_type == "npu":
             backend = "hccl"
             torch.npu.set_device(local_rank)
             device = torch.device(f"npu:{local_rank}")
-        else:
+        else:  # CPU
             backend = "gloo"
             device = torch.device("cpu")
 
@@ -99,8 +98,13 @@ def setup_distributed():
         )
         return rank, world_size, local_rank, device
     else:
-        # 单进程训练
-        device = torch.device("cuda:0" if torch.cuda.is_available() else "npu:0" if NPU_AVAILABLE else "cpu")
+        # 单进程
+        if device_type == "cuda":
+            device = torch.device("cuda:0")
+        elif device_type == "npu":
+            device = torch.device("npu:0")
+        else:
+            device = torch.device("cpu")
         return 0, 1, 0, device
 
 def cleanup_distributed():
@@ -147,11 +151,14 @@ def update_policy(
 
     # forward
     if use_amp:
-        if NPU_AVAILABLE and device.type == "npu":
+        if device.type == "cuda":
+            with torch.cuda.amp.autocast():
+                loss, output_dict = policy.forward(batch)
+        elif device.type == "npu":
             with torch.npu.amp.autocast():
                 loss, output_dict = policy.forward(batch)
         else:
-            loss, output_dict = policy.forward(batch)
+            loss, output_dict = policy.forward(batch)  # AMP not supported on CPU
     else:
         loss, output_dict = policy.forward(batch)
 
@@ -278,41 +285,16 @@ def train(cfg: TrainPipelineConfig):
     if rank == 0:
         logging.info("Creating optimizer and scheduler")
 
-    # # >>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>
-    # # 如果 cfg.optimizer 为 None，设置默认值（兼容原逻辑）
-    # if cfg.optimizer is None:
-    #     from dataclasses import dataclass
-
-    #     @dataclass
-    #     class DefaultOptimizerConfig:
-    #         name: str = "adamw"
-    #         lr: float = 1e-4
-    #         weight_decay: float = 0.01
-    #         betas: tuple = (0.9, 0.95)
-    #         grad_clip_norm: float = 1.0
-
-    #         def build(self, params):
-    #             if self.name == "adamw":
-    #                 import torch.optim as optim
-    #                 return optim.AdamW(params, lr=self.lr, weight_decay=self.weight_decay, betas=self.betas)
-    #             else:
-    #                 raise ValueError(f"Unsupported optimizer: {self.name}")
-
-    #     cfg.optimizer = DefaultOptimizerConfig()
-    #     if rank == 0:
-    #         logging.warning(
-    #             colored("cfg.optimizer was None, using default AdamW optimizer.", "yellow")
-    #         )
-    # # <<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<
-
     base_policy = policy.module if hasattr(policy, "module") else policy
     optimizer, lr_scheduler = make_optimizer_and_scheduler(cfg, base_policy)
 
     # GradScaler
-    if NPU_AVAILABLE and device.type == "npu":
-        grad_scaler = torch_npu.npu.amp.GradScaler(device.type, enabled=cfg.policy.use_amp)
+    if device.type == "cuda":
+        grad_scaler = GradScaler(enabled=cfg.policy.use_amp)
+    elif device.type == "npu":
+        grad_scaler = torch_npu.npu.amp.GradScaler(enabled=cfg.policy.use_amp)
     else:
-        grad_scaler = GradScaler(device.type, enabled=cfg.policy.use_amp)
+        grad_scaler = GradScaler(enabled=False)  # CPU 不支持 AMP
 
     # 恢复训练状态
     step = 0
@@ -414,9 +396,14 @@ def train(cfg: TrainPipelineConfig):
 
         if is_eval_step and cfg.env and rank == 0:
             step_id = get_step_identifier(step, cfg.steps)
-            with torch.no_grad(), (
-                torch.npu.amp.autocast() if NPU_AVAILABLE and device.type == "npu" and cfg.policy.use_amp else nullcontext()
-            ):
+            amp_ctx = nullcontext()
+            if cfg.policy.use_amp:
+                if device.type == "cuda":
+                    amp_ctx = torch.cuda.amp.autocast()
+                elif device.type == "npu":
+                    amp_ctx = torch.npu.amp.autocast()
+
+            with torch.no_grad(), amp_ctx:
                 eval_info = eval_policy_all(
                     envs=eval_env,  # dict[suite][task_id] -> vec_env
                     policy=policy,
