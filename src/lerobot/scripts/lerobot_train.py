@@ -62,10 +62,6 @@ def detect_device():
     if torch.cuda.is_available():
         return "cuda"
     elif hasattr(torch, "npu") and torch.npu.is_available():
-        import torch_npu
-        from torch_npu.contrib import transfer_to_npu
-        device = "npu:0"
-        torch.npu.set_device(device)
         return "npu"
     else:
         return "cpu"
@@ -247,7 +243,7 @@ def train(cfg: TrainPipelineConfig):
     if world_size > 1:
         policy = DDP(policy, device_ids=[local_rank] if device.type != "cpu" else None,
                     find_unused_parameters=True)
-        dist.barrier(device_ids=[local_rank] if device.type != "cpu" else None)
+        # dist.barrier(device_ids=[local_rank] if device.type != "cpu" else None)
 
     # Create processors - only provide dataset_stats if not resuming from saved processors
     processor_kwargs = {}
@@ -299,6 +295,14 @@ def train(cfg: TrainPipelineConfig):
     if device.type == "cuda":
         grad_scaler = GradScaler(enabled=cfg.policy.use_amp)
     elif device.type == "npu":
+        # 动态导入 torch_npu 仅当使用 NPU 时
+        try:
+            import torch_npu
+        except ImportError as e:
+            raise ImportError(
+                "NPU is detected but 'torch_npu' is not installed. "
+                "Please install torch_npu for Ascend NPU support."
+            ) from e
         grad_scaler = torch_npu.npu.amp.GradScaler(enabled=cfg.policy.use_amp)
     else:
         grad_scaler = GradScaler(enabled=False)  # CPU 不支持 AMP
@@ -331,10 +335,18 @@ def train(cfg: TrainPipelineConfig):
     else:
         sampler = base_sampler
 
+    per_node_batch_size = cfg.batch_size // world_size
+    if cfg.batch_size % world_size != 0:
+        if rank == 0:
+            logging.warning(
+                f"Total batch_size ({cfg.batch_size}) is not divisible by world_size ({world_size}). "
+                f"Using per-node batch size = {per_node_batch_size} (total effective = {per_node_batch_size * world_size})"
+            )
+
     dataloader = torch.utils.data.DataLoader(
         dataset,
         num_workers=cfg.num_workers,
-        batch_size=cfg.batch_size,
+        batch_size=per_node_batch_size,
         shuffle=shuffle and not cfg.dataset.streaming,
         sampler=sampler,
         drop_last=False,
@@ -351,7 +363,7 @@ def train(cfg: TrainPipelineConfig):
         "update_s": AverageMeter("updt_s", ":.3f"),
         "dataloading_s": AverageMeter("data_s", ":.3f"),
     }
-    train_tracker = MetricsTracker(cfg.batch_size, dataset.num_frames, dataset.num_episodes, train_metrics, initial_step=step)
+    train_tracker = MetricsTracker(per_node_batch_size * world_size, dataset.num_frames, dataset.num_episodes, train_metrics, initial_step=step)
 
     if rank == 0:
         from tqdm import tqdm
@@ -443,6 +455,8 @@ def train(cfg: TrainPipelineConfig):
                 wandb_log_dict = {**eval_tracker.to_dict(), **eval_info}
                 wandb_logger.log_dict(wandb_log_dict, step, mode="eval")
                 wandb_logger.log_video(eval_info["overall"]["video_paths"][0], step, mode="eval")
+        if world_size > 1:
+            dist.barrier()
 
     if eval_env:
         close_envs(eval_env)
