@@ -158,18 +158,3 @@ echo "Training started for model: ${MODEL_TYPE:-custom}"
 echo "Config file: $CONFIG_PATH"
 echo "Log file: $LOG_FILE"
 echo "PID: $PID"
-# ========== 任务 A: smolvla (2卡) ==========
-# ASCEND_RT_VISIBLE_DEVICES=0,1 \
-# torchrun --nproc_per_node=2 --master_addr=127.0.0.1 --master_port=29500 \
-#     /root/zzx/workspace/lerobot-mujoco-tutorial/train_model.py \
-#     --config_path=/root/zzx/workspace/lerobot-mujoco-tutorial/smolvla_omy.yaml \
-#     --output_dir=/root/zzx/workspace/lerobot-mujoco-tutorial/ckpt/smolvla_train \
-#     > smolvla.log 2>&1 &
-
-# ========== 任务 B: pi0 (6卡) ==========
-# ASCEND_RT_VISIBLE_DEVICES=2,3,4,5,6,7 \
-# torchrun --nproc_per_node=6 --master_addr=127.0.0.1 --master_port=29501 \
-#     /root/zzx/workspace/lerobot-mujoco-tutorial/train_model.py \
-#     --config_path=/root/zzx/workspace/lerobot-mujoco-tutorial/pi0_omy.yaml \
-#     --output_dir=/root/zzx/workspace/lerobot-mujoco-tutorial/ckpt/pi0_train \
-#     > pi0.log 2>&1 &为什么我执行 sh scripts/run_train.sh pi05 --resume --config ./ckpt/pi05_libero/checkpoints/last/pretrained_model/train_config.json 训练程序没有执行起来

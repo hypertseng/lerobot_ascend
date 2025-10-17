@@ -18,7 +18,7 @@ policy:
 
 save_checkpoint: true
 output_dir: ./ckpt/pi05_libero
-batch_size: 64
+batch_size: 128
 job_name: pi05_libero
 resume: false
 steps: 20000
@@ -31,6 +31,6 @@ use_policy_training_preset: true
 wandb:
   enable: true
 
-  project: pi05_libero
+  project: pi05_libero_910b
   entity: jeffreytseng123-chinese-academy-of-sciences
   disable_artifact: true
