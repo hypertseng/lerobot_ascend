@@ -5,6 +5,8 @@
 # 支持后台运行、resume模式、日志管理
 # =============================================
 
+export PYTORCH_NPU_ALLOC_CONF="max_split_size_mb:32"
+
 # -------------------------
 # 获取项目根目录
 # -------------------------
@@ -145,9 +147,8 @@ fi
 # -------------------------
 # 启动训练
 # -------------------------
-nohup torchrun --nproc_per_node="$NPROC" \
-    --master_addr=127.0.0.1 --master_port="$MASTER_PORT" \
-    -m lerobot.scripts.lerobot_train \
+nohup accelerate launch   --multi_gpu --num_processes="$NPROC" \
+    $(which lerobot-train) \
     "${TRAIN_ARGS[@]}" \
     > "$LOG_FILE" 2>&1 &
 

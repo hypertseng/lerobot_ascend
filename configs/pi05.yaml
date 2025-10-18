@@ -18,12 +18,10 @@ policy:
 
 save_checkpoint: true
 output_dir: ./ckpt/pi05_libero
-batch_size: 128
+batch_size: 32
 job_name: pi05_libero
-resume: false
-steps: 20000
+steps: 10000
 eval_freq: -1  # No evaluation during distributed training
-log_freq: 200  # 8卡训练减少日志频率
 save_checkpoint: true
 save_freq: 5_000
 use_policy_training_preset: true

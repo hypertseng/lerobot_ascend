@@ -1,22 +1,34 @@
+#!/usr/bin/env python
+
+# Copyright 2024 The HuggingFace Inc. team. All rights reserved.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 import logging
 import time
-import os
+from tqdm import tqdm
 from contextlib import nullcontext
 from pprint import pformat
 from typing import Any
+
 import torch
+import torch_npu
+from torch_npu.contrib import transfer_to_npu
 from accelerate import Accelerator
 from termcolor import colored
 from torch.optim import Optimizer
-from termcolor import colored
 
-# 提前初始化日志
-from lerobot.utils.utils import init_logging as _init_logging_at_import
-_init_logging_at_import()
-
-os.environ["TOKENIZERS_PARALLELISM"] = "false"
-
-
+from lerobot.configs import parser
+from lerobot.configs.train import TrainPipelineConfig
 from lerobot.datasets.factory import make_dataset
 from lerobot.datasets.sampler import EpisodeAwareSampler
 from lerobot.datasets.utils import cycle
@@ -26,6 +38,7 @@ from lerobot.optim.factory import make_optimizer_and_scheduler
 from lerobot.policies.factory import make_policy, make_pre_post_processors
 from lerobot.policies.pretrained import PreTrainedPolicy
 from lerobot.rl.wandb_utils import WandBLogger
+from lerobot.scripts.lerobot_eval import eval_policy_all
 from lerobot.utils.logging_utils import AverageMeter, MetricsTracker
 from lerobot.utils.random_utils import set_seed
 from lerobot.utils.train_utils import (
@@ -40,71 +53,8 @@ from lerobot.utils.utils import (
     has_method,
     init_logging,
 )
-from lerobot.configs import parser
-from lerobot.configs.train import TrainPipelineConfig
-from lerobot.scripts.lerobot_eval import eval_policy_all
 
-import wandb
 
-import datasets.features.features as features
-_OLD_GENERATE_FROM_DICT = features.generate_from_dict
-def _new_generate_from_dict(obj):
-    if isinstance(obj, dict) and obj.get("_type") == "List":
-        obj["_type"] = "Sequence"
-    return _OLD_GENERATE_FROM_DICT(obj)
-features.generate_from_dict = _new_generate_from_dict
-
-# ---------------- 设备与分布式初始化 ----------------
-def detect_device():
-    if torch.cuda.is_available():
-        return "cuda"
-    elif hasattr(torch, "npu") and torch.npu.is_available():
-        return "npu"
-    else:
-        return "cpu"
-
-def setup_distributed():
-    """设置分布式训练环境，兼容 GPU (nccl) 和 NPU (hccl)"""
-    device_type = detect_device()
-    if "RANK" in os.environ and "WORLD_SIZE" in os.environ:
-        rank = int(os.environ["RANK"])
-        world_size = int(os.environ["WORLD_SIZE"])
-        local_rank = int(os.environ["LOCAL_RANK"])
-
-        if device_type == "cuda":
-            backend = "nccl"
-            torch.cuda.set_device(local_rank)
-            device = torch.device(f"cuda:{local_rank}")
-        elif device_type == "npu":
-            backend = "hccl"
-            torch.npu.set_device(local_rank)
-            device = torch.device(f"npu:{local_rank}")
-        else:  # CPU
-            backend = "gloo"
-            device = torch.device("cpu")
-
-        dist.init_process_group(
-            backend=backend,
-            init_method="env://",
-            world_size=world_size,
-            rank=rank,
-        )
-        return rank, world_size, local_rank, device
-    else:
-        # 单进程
-        if device_type == "cuda":
-            device = torch.device("cuda:0")
-        elif device_type == "npu":
-            device = torch.device("npu:0")
-        else:
-            device = torch.device("cpu")
-        return 0, 1, 0, device
-
-def cleanup_distributed():
-    if dist.is_initialized():
-        dist.destroy_process_group()
-
-# ---------------- Policy更新 ----------------
 def update_policy(
     train_metrics: MetricsTracker,
     policy: PreTrainedPolicy,
@@ -161,6 +111,7 @@ def update_policy(
 
     optimizer.zero_grad()
 
+    # Step through pytorch scheduler at every batch instead of epoch
     if lr_scheduler is not None:
         lr_scheduler.step()
 
@@ -174,7 +125,7 @@ def update_policy(
     train_metrics.update_s = time.perf_counter() - start_time
     return train_metrics, output_dict
 
-# ---------------- 训练主函数 ----------------
+
 @parser.wrap()
 def train(cfg: TrainPipelineConfig, accelerator: Accelerator | None = None):
     """
@@ -192,8 +143,6 @@ def train(cfg: TrainPipelineConfig, accelerator: Accelerator | None = None):
         cfg: A `TrainPipelineConfig` object containing all training configurations.
         accelerator: Optional Accelerator instance. If None, one will be created automatically.
     """
-    rank, world_size, local_rank, device = setup_distributed()
-
     cfg.validate()
 
     # Create Accelerator if not provided
@@ -269,28 +218,20 @@ def train(cfg: TrainPipelineConfig, accelerator: Accelerator | None = None):
         # Only provide dataset_stats when not resuming from saved processor state
         processor_kwargs["dataset_stats"] = dataset.meta.stats
 
-    if hasattr(policy, "module"):
-        policy_config = policy.module.config
-    else:
-        policy_config = policy.config
-
     if cfg.policy.pretrained_path is not None:
         processor_kwargs["preprocessor_overrides"] = {
             "device_processor": {"device": device.type},
             "normalizer_processor": {
                 "stats": dataset.meta.stats,
-                "features": {
-                    **policy_config.input_features,
-                    **policy_config.output_features,
-                },
-                "norm_map": policy_config.normalization_mapping,
+                "features": {**policy.config.input_features, **policy.config.output_features},
+                "norm_map": policy.config.normalization_mapping,
             },
         }
         postprocessor_kwargs["postprocessor_overrides"] = {
             "unnormalizer_processor": {
                 "stats": dataset.meta.stats,
-                "features": policy_config.output_features,
-                "norm_map": policy_config.normalization_mapping,
+                "features": policy.config.output_features,
+                "norm_map": policy.config.normalization_mapping,
             },
         }
 
@@ -335,33 +276,17 @@ def train(cfg: TrainPipelineConfig, accelerator: Accelerator | None = None):
             drop_n_last_frames=cfg.policy.drop_n_last_frames,
             shuffle=True,
         )
-        shuffle = False
-
-    if world_size > 1:
-        sampler = DistributedSampler(
-            dataset,
-            num_replicas=world_size,
-            rank=rank,
-            shuffle=True and base_sampler is None
-        )
-        shuffle = False
     else:
-        sampler = base_sampler
-
-    per_node_batch_size = cfg.batch_size // world_size
-    if cfg.batch_size % world_size != 0:
-        if rank == 0:
-            logging.warning(
-                f"Total batch_size ({cfg.batch_size}) is not divisible by world_size ({world_size}). "
-                f"Using per-node batch size = {per_node_batch_size} (total effective = {per_node_batch_size * world_size})"
-            )
+        shuffle = True
+        sampler = None
 
     dataloader = torch.utils.data.DataLoader(
         dataset,
         num_workers=cfg.num_workers,
-        batch_size=per_node_batch_size,
+        batch_size=cfg.batch_size,
         shuffle=shuffle and not cfg.dataset.streaming,
         sampler=sampler,
+        pin_memory=device.type == "cuda",
         drop_last=False,
         prefetch_factor=2 if cfg.num_workers > 0 else None,
     )
@@ -373,7 +298,8 @@ def train(cfg: TrainPipelineConfig, accelerator: Accelerator | None = None):
     )
     dl_iter = cycle(dataloader)
 
-    # Metrics
+    policy.train()
+
     train_metrics = {
         "loss": AverageMeter("loss", ":.3f"),
         "grad_norm": AverageMeter("grdn", ":.3f"),
@@ -396,7 +322,17 @@ def train(cfg: TrainPipelineConfig, accelerator: Accelerator | None = None):
     if is_main_process:
         logging.info("Start offline training on a fixed dataset")
 
-    for _ in range(step, cfg.steps):
+    # Initialize progress bar only on main process
+    progress_bar = tqdm(
+        total=cfg.steps,
+        initial=step,
+        desc="Training",
+        disable=not is_main_process,
+        leave=True,
+        dynamic_ncols=True,
+    )
+
+    while step < cfg.steps:
         start_time = time.perf_counter()
         batch = next(dl_iter)
         batch = preprocessor(batch)
@@ -411,13 +347,24 @@ def train(cfg: TrainPipelineConfig, accelerator: Accelerator | None = None):
             accelerator=accelerator,
             lr_scheduler=lr_scheduler,
         )
+
         step += 1
         train_tracker.step()
+
+        # Update progress bar
+        if is_main_process:
+            progress_bar.set_postfix(
+                loss=f"{train_tracker.loss.val:.4f}",
+                lr=f"{train_tracker.lr.val:.1e}",
+                grad_norm=f"{train_tracker.grad_norm.val:.2f}",
+            )
+            progress_bar.update(1)
+
         is_log_step = cfg.log_freq > 0 and step % cfg.log_freq == 0 and is_main_process
         is_saving_step = step % cfg.save_freq == 0 or step == cfg.steps
         is_eval_step = cfg.eval_freq > 0 and step % cfg.eval_freq == 0
 
-        if is_log_step and rank == 0:
+        if is_log_step:
             logging.info(train_tracker)
             if wandb_logger:
                 wandb_log_dict = train_tracker.to_dict()
@@ -443,7 +390,6 @@ def train(cfg: TrainPipelineConfig, accelerator: Accelerator | None = None):
                 update_last_checkpoint(checkpoint_dir)
                 if wandb_logger:
                     wandb_logger.log_policy(checkpoint_dir)
-
             accelerator.wait_for_everyone()
 
         if cfg.env and is_eval_step:
@@ -452,7 +398,7 @@ def train(cfg: TrainPipelineConfig, accelerator: Accelerator | None = None):
                 logging.info(f"Eval policy at step {step}")
                 with torch.no_grad(), accelerator.autocast():
                     eval_info = eval_policy_all(
-                        envs=eval_env,  # dict[suite][task_id] -> vec_env
+                        envs=eval_env,
                         policy=accelerator.unwrap_model(policy),
                         preprocessor=preprocessor,
                         postprocessor=postprocessor,
@@ -462,14 +408,10 @@ def train(cfg: TrainPipelineConfig, accelerator: Accelerator | None = None):
                         start_seed=cfg.seed,
                         max_parallel_tasks=cfg.env.max_parallel_tasks,
                     )
-                # overall metrics (suite-agnostic)
                 aggregated = eval_info["overall"]
-
-                # optional: per-suite logging
                 for suite, suite_info in eval_info.items():
                     logging.info("Suite %s aggregated: %s", suite, suite_info)
 
-                # meters/tracker
                 eval_metrics = {
                     "avg_sum_reward": AverageMeter("∑rwrd", ":.3f"),
                     "pc_success": AverageMeter("success", ":.1f"),
@@ -490,8 +432,11 @@ def train(cfg: TrainPipelineConfig, accelerator: Accelerator | None = None):
                     wandb_log_dict = {**eval_tracker.to_dict(), **eval_info}
                     wandb_logger.log_dict(wandb_log_dict, step, mode="eval")
                     wandb_logger.log_video(eval_info["overall"]["video_paths"][0], step, mode="eval")
-
             accelerator.wait_for_everyone()
+
+    # Close progress bar
+    if is_main_process:
+        progress_bar.close()
 
     if eval_env:
         close_envs(eval_env)
