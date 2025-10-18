@@ -64,15 +64,12 @@ def get_safe_torch_device(try_device: str, log: bool = False) -> torch.device:
         case "mps":
             assert torch.backends.mps.is_available()
             device = torch.device("mps")
-<<<<<<< HEAD
         case "npu":
             assert torch.npu.is_available()
             device = torch.device("npu")
-=======
         case "xpu":
             assert torch.xpu.is_available()
             device = torch.device("xpu")
->>>>>>> upstream/main
         case "cpu":
             device = torch.device("cpu")
             if log:
