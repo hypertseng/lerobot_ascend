@@ -25,14 +25,14 @@ PROJECT_ROOT="$( cd "$( dirname "${BASH_SOURCE[0]}" )/.." && pwd )"
 #                 --policy.device=npu \
 #                 --output_dir=./eval_output/pi0_pusht
 
-python -m lerobot.scripts.lerobot_eval\
-  --policy.path=$PROJECT_ROOT/ckpt/smolvla_libero/checkpoints/last/pretrained_model \
-  --env.type=libero \
-  --env.task=libero_object \
-  --eval.batch_size=1 \
-  --eval.n_episodes=1 \
-  --policy.device=npu \
-  --output_dir=./eval_output/smolvla_libero
+# python -m lerobot.scripts.lerobot_eval\
+#   --policy.path=$PROJECT_ROOT/ckpt/smolvla_libero/checkpoints/last/pretrained_model \
+#   --env.type=libero \
+#   --env.task=libero_object \
+#   --eval.batch_size=1 \
+#   --eval.n_episodes=1 \
+#   --policy.device=npu \
+#   --output_dir=./eval_output/smolvla_libero
 
 
 # python -m lerobot.scripts.lerobot_eval\
@@ -43,3 +43,12 @@ python -m lerobot.scripts.lerobot_eval\
 #   --eval.n_episodes=1 \
 #   --policy.device=npu \
 #   --output_dir=./eval_output/smolvla_libero_official
+
+python -m lerobot.scripts.lerobot_eval\
+  --policy.path=HuggingFaceVLA/smolvla_libero \
+  --env.type=libero \
+  --env.task=libero_object \
+  --eval.batch_size=1 \
+  --eval.n_episodes=1 \
+  --policy.device=npu \
+  --output_dir=./eval_output/smolvla_libero_official

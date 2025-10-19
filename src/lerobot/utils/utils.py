@@ -115,21 +115,14 @@ def is_torch_device_available(try_device: str) -> bool:
         return torch.cuda.is_available()
     elif try_device == "mps":
         return torch.backends.mps.is_available()
-<<<<<<< HEAD
     elif try_device == "npu":
         return torch.npu.is_available()
     elif try_device == "cpu":
         return True
-    else: 
-        raise ValueError(f"Unknown device {try_device}. Supported devices are: cuda, mps or cpu.")
-=======
     elif try_device == "xpu":
         return torch.xpu.is_available()
-    elif try_device == "cpu":
-        return True
     else:
         raise ValueError(f"Unknown device {try_device}. Supported devices are: cuda, mps, xpu or cpu.")
->>>>>>> upstream/main
 
 
 def is_amp_available(device: str):
