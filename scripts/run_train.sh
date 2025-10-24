@@ -2,7 +2,7 @@
 # =============================================
 # run_train.sh
 # 功能: 通用训练脚本，根据模型名自动加载配置文件
-# 支持后台运行、resume模式、日志管理
+# 支持后台运行、resume模式、混合精度模式、日志管理
 # =============================================
 
 export PYTORCH_NPU_ALLOC_CONF="max_split_size_mb:32"
@@ -21,6 +21,8 @@ MASTER_PORT=29500
 MODEL_TYPE=""
 CUSTOM_CONFIG=""
 USE_RESUME=false
+USE_MIXED_PRECISION=false
+MIXED_PRECISION_TYPE="bf16"  # 默认使用 bf16
 
 # -------------------------
 # 参数解析
@@ -43,12 +45,24 @@ while [[ $# -gt 0 ]]; do
             USE_RESUME=true
             shift
             ;;
+        --mix|--mixed|--mixed_precision)
+            USE_MIXED_PRECISION=true
+            # 检查是否指定了精度类型
+            if [[ -n "$2" && ! "$2" =~ ^- ]]; then
+                MIXED_PRECISION_TYPE="$2"
+                shift 2
+            else
+                MIXED_PRECISION_TYPE="fp16"
+                shift 1
+            fi
+            ;;
         -h|--help)
-            echo "Usage: $0 [--config <path>] [<model_type>] [--nproc <num>] [--port <port>] [--resume]"
+            echo "Usage: $0 [--config <path>] [<model_type>] [--nproc <num>] [--port <port>] [--resume] [--mix [fp16|bf16|fp8]]"
             echo "Example:"
-            echo "  ./train_launcher.sh pi0"
-            echo "  ./train_launcher.sh smolvla --resume"
-            echo "  ./train_launcher.sh --config configs/custom.yaml"
+            echo "  ./run_train.sh pi0"
+            echo "  ./run_train.sh smolvla --resume"
+            echo "  ./run_train.sh smolvla --mix fp16"
+            echo "  ./run_train.sh --config configs/custom.yaml --mix bf16"
             exit 0
             ;;
         *)
@@ -70,11 +84,9 @@ if [ -n "$CUSTOM_CONFIG" ]; then
     CONFIG_PATH="$PROJECT_ROOT/$CUSTOM_CONFIG"
     echo "Using custom config: $CONFIG_PATH"
 elif [ -n "$MODEL_TYPE" ]; then
-    # 自动匹配 configs/train_<MODEL_TYPE>.yaml
     CONFIG_PATH="$PROJECT_ROOT/configs/${MODEL_TYPE}.yaml"
     if [ ! -f "$CONFIG_PATH" ]; then
         echo "Error: Config file not found for model '$MODEL_TYPE': $CONFIG_PATH"
-        echo "Hint: Expected file path is '$PROJECT_ROOT/configs/${MODEL_TYPE}.yaml'"
         exit 1
     fi
     echo "Using config for model '$MODEL_TYPE': $CONFIG_PATH"
@@ -92,7 +104,7 @@ if ! command -v torchrun >/dev/null 2>&1; then
 fi
 
 # -------------------------
-# 检查 output_dir
+# 检查 output_dir 与 resume
 # -------------------------
 OUTPUT_DIR_ORIG=$(awk '/^[[:space:]]*output_dir:/{gsub(/^[[:space:]]*output_dir:[[:space:]]*/, ""); print; exit}' "$CONFIG_PATH")
 
@@ -129,13 +141,7 @@ LOG_FILE="$PROJECT_ROOT/ckpt/logs/train_${MODEL_TYPE:-custom}_${TIMESTAMP}.log"
 mkdir -p "$PROJECT_ROOT/ckpt/logs"
 
 # -------------------------
-# 环境变量
-# -------------------------
-# export PYTORCH_NPU_ALLOC_CONF="max_split_size_mb:32,garbage_collection_threshold:0.8"
-# echo "Using PYTORCH_NPU_ALLOC_CONF=$PYTORCH_NPU_ALLOC_CONF"
-
-# -------------------------
-# 构建训练命令
+# 构建训练命令参数
 # -------------------------
 TRAIN_ARGS=(--config_path="$CONFIG_PATH")
 
@@ -145,9 +151,19 @@ if [[ "$USE_RESUME" == true ]]; then
 fi
 
 # -------------------------
+# 构建 accelerate 参数
+# -------------------------
+ACCELERATE_ARGS=(--multi_gpu --num_processes="$NPROC")
+
+if [[ "$USE_MIXED_PRECISION" == true ]]; then
+    echo "Using mixed precision: $MIXED_PRECISION_TYPE"
+    ACCELERATE_ARGS+=(--mixed_precision "$MIXED_PRECISION_TYPE")
+fi
+
+# -------------------------
 # 启动训练
 # -------------------------
-nohup accelerate launch   --multi_gpu --num_processes="$NPROC" \
+nohup accelerate launch "${ACCELERATE_ARGS[@]}" \
     $(which lerobot-train) \
     "${TRAIN_ARGS[@]}" \
     > "$LOG_FILE" 2>&1 &
@@ -155,7 +171,12 @@ nohup accelerate launch   --multi_gpu --num_processes="$NPROC" \
 PID=$!
 
 echo ""
+echo "============================================="
 echo "Training started for model: ${MODEL_TYPE:-custom}"
 echo "Config file: $CONFIG_PATH"
 echo "Log file: $LOG_FILE"
+echo "Mixed precision: ${USE_MIXED_PRECISION:+$MIXED_PRECISION_TYPE}"
+echo "Resume: $RESUME_FINAL"
+echo "Num processes: $NPROC"
 echo "PID: $PID"
+echo "============================================="

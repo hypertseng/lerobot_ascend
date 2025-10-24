@@ -1,7 +1,8 @@
 Xvfb :1 -screen 0 1024x768x24 &
 export DISPLAY=:1
 export LIBGL_ALWAYS_SOFTWARE=1
-export LD_LIBRARY_PATH=/usr/lib64:$LD_LIBRARY_PATH
+export LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libOSMesa.so
+export LD_LIBRARY_PATH=/lib/aarch64-linux-gnu/:$LD_LIBRARY_PATH
 export MUJOCO_GL=osmesa
 export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 
