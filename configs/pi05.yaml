@@ -2,6 +2,8 @@ dataset:
   # repo_id: lerobot/aloha_sim_transfer_cube_human
   # repo_id: lerobot/pusht
   repo_id: HuggingFaceVLA/libero
+  # repo_id: lerobot/metaworld_mt50
+
 
 
 policy:
@@ -15,12 +17,14 @@ policy:
   gradient_checkpointing: true
   pretrained_path: lerobot/pi05_base
   compile_model: true
+  normalization_mapping: {"ACTION": "MEAN_STD", "STATE": "MEAN_STD", "VISUAL": "IDENTITY"}
 
-save_checkpoint: true
+# output_dir: ./ckpt/pi05_meta
 output_dir: ./ckpt/pi05_libero
 batch_size: 16
+# job_name: pi05_meta
 job_name: pi05_libero
-steps: 40000
+steps: 20000
 eval_freq: -1  # No evaluation during distributed training
 save_checkpoint: true
 save_freq: 5_000
@@ -29,6 +33,7 @@ use_policy_training_preset: true
 wandb:
   enable: true
 
-  project: pi05_libero_910b
+  # project: pi05_meta
+  project: pi05_libero
   entity: jeffreytseng123-chinese-academy-of-sciences
   disable_artifact: true

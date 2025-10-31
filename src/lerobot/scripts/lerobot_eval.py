@@ -61,6 +61,9 @@ from pathlib import Path
 from pprint import pformat
 from typing import Any, TypedDict
 import torch
+# import mindnlp
+# import mindspore
+# mindspore.set_context(pynative_synchronize=True)
 import torch_npu
 # from torch_npu.contrib import transfer_to_npu
 device = "npu:0"
@@ -547,7 +550,7 @@ def eval_main(cfg: EvalPipelineConfig):
         json.dump(info, f, indent=2)
 
     logging.info("End of eval")
-    
+
 
 # ---- typed payload returned by one task eval ----
 class TaskMetrics(TypedDict):
@@ -759,7 +762,6 @@ def eval_policy_all(
         "per_group": groups_aggregated,
         "overall": overall_agg,
     }
-
 
 
 def main():

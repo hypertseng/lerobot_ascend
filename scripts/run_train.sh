@@ -126,10 +126,6 @@ fi
 
 if [[ "$RESUME_FINAL" != true ]] && [[ -n "$OUTPUT_DIR_ORIG" ]] && [[ -d "$OUTPUT_DIR_ORIG" ]]; then
     OUTPUT_DIR_NEW="${OUTPUT_DIR_ORIG}_$(date +%Y%m%d_%H%M%S)"
-    mkdir -p "$OUTPUT_DIR_NEW"
-    TEMP_CONFIG=$(mktemp)
-    sed "s|^\([[:space:]]*\)output_dir:.*|\1output_dir: $OUTPUT_DIR_NEW|" "$CONFIG_PATH" > "$TEMP_CONFIG"
-    CONFIG_PATH="$TEMP_CONFIG"
     echo "Auto-adjusted output_dir to avoid conflict: $OUTPUT_DIR_NEW"
 fi
 
@@ -163,11 +159,18 @@ fi
 # -------------------------
 # 启动训练
 # -------------------------
+# nohup accelerate launch "${ACCELERATE_ARGS[@]}" \
+RAW_OUTPUT_DIR=$(awk '/^[[:space:]]*output_dir:/{gsub(/^[[:space:]]*output_dir:[[:space:]]*/, ""); print; exit}' "$CONFIG_PATH")
+RAW_JOB_NAME=$(awk '/^[[:space:]]*job_name:/{gsub(/^[[:space:]]*job_name:[[:space:]]*/, ""); print; exit}' "$CONFIG_PATH")
+OUTPUT_DIR_FINAL="${RAW_OUTPUT_DIR}_${TIMESTAMP}"
+JOB_NAME_FINAL="${RAW_JOB_NAME}_${TIMESTAMP}"
+
 nohup accelerate launch "${ACCELERATE_ARGS[@]}" \
     $(which lerobot-train) \
     "${TRAIN_ARGS[@]}" \
+    --output_dir="$OUTPUT_DIR_FINAL" \
+    --job_name="$JOB_NAME_FINAL" \
     > "$LOG_FILE" 2>&1 &
-
 PID=$!
 
 echo ""
