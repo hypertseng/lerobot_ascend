@@ -45,6 +45,9 @@ def auto_select_torch_device() -> torch.device:
     elif torch.backends.mps.is_available():
         logging.info("Metal backend detected, using mps.")
         return torch.device("mps")
+    elif torch.npu.is_available():
+        logging.info("Huawei NPU backend detected, using npu.")
+        return torch.device("npu")
     elif torch.xpu.is_available():
         logging.info("Intel XPU backend detected, using xpu.")
         return torch.device("xpu")
