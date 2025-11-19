@@ -1,5 +1,6 @@
 dataset:
-  repo_id: lerobot/metaworld_mt50
+  # repo_id: lerobot/metaworld_mt50
+  repo_id: HuggingFaceVLA/libero
 
 
 policy:
@@ -21,7 +22,7 @@ output_dir: ./ckpt/smovla_meta
 batch_size: 32
 job_name: smovla_meta
 steps: 10000
-eval_freq: 1000
+eval_freq: -1
 save_checkpoint: true
 save_freq: 5_000
 use_policy_training_preset: true

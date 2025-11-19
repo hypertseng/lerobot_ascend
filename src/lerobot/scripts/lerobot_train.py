@@ -23,6 +23,15 @@ from typing import Any
 import torch
 import torch_npu
 from torch_npu.contrib import transfer_to_npu
+torch_npu.npu.set_aoe("/data/zzx/workspace/dump")
+torch_npu.npu.set_compile_mode(jit_compile=True)
+
+# import os
+# os.environ["CUSTOMIZED_OP_PATH"] = "/data/zzx/workspace/custom_tune_bank/Ascend910B2"
+# option = {"ACL_OP_COMPILER_CACHE_MODE": "force"}
+# torch_npu.npu.set_option(option)
+# torch_npu.npu.set_compile_mode(jit_compile=True)
+
 # import mindnlp
 from accelerate import Accelerator
 from termcolor import colored
@@ -57,7 +66,7 @@ from lerobot.utils.utils import (
 
 
 experimental_config = torch_npu.profiler._ExperimentalConfig(
-    export_type=[torch_npu.profiler.ExportType.Text],
+    export_type=torch_npu.profiler.ExportType.Text,
     profiler_level=torch_npu.profiler.ProfilerLevel.Level2,
     msprof_tx=False,
     aic_metrics=torch_npu.profiler.AiCMetrics.AiCoreNone,
@@ -573,170 +582,171 @@ def train(cfg: TrainPipelineConfig, accelerator: Accelerator | None = None):
 #         eval_env = make_env(cfg.env, n_envs=cfg.eval.batch_size, use_async_envs=cfg.eval.use_async_envs)
 
 
-#     with torch_npu.profiler.profile(
-#     activities=[
-#         torch_npu.profiler.ProfilerActivity.CPU,
-#         torch_npu.profiler.ProfilerActivity.NPU
-#         ],
-#     on_trace_ready=torch_npu.profiler.tensorboard_trace_handler("./profiling_mem"),
-#     record_shapes=True,
-#     profile_memory=True,
-#     with_stack=True,
-#     with_modules=True,
-#     with_flops=True,
-#     experimental_config=experimental_config) as prof:
-#         if is_main_process:
-#             logging.info("Creating policy")
-#         policy = make_policy(
-#             cfg=cfg.policy,
-#             ds_meta=dataset.meta,
-#             rename_map=cfg.rename_map,
-#         )
+#     # with torch_npu.profiler.profile(
+#     # activities=[
+#     #     torch_npu.profiler.ProfilerActivity.CPU,
+#     #     torch_npu.profiler.ProfilerActivity.NPU
+#     #     ],
+#     # on_trace_ready=torch_npu.profiler.tensorboard_trace_handler("./profiling_mem"),
+#     # record_shapes=True,
+#     # profile_memory=True,
+#     # with_stack=True,
+#     # with_modules=True,
+#     # with_flops=True,
+#     # experimental_config=experimental_config
+#     # ) as prof:
+#     if is_main_process:
+#         logging.info("Creating policy")
+#     policy = make_policy(
+#         cfg=cfg.policy,
+#         ds_meta=dataset.meta,
+#         rename_map=cfg.rename_map,
+#     )
 
-#         # Wait for all processes to finish policy creation before continuing
-#         accelerator.wait_for_everyone()
+#     # Wait for all processes to finish policy creation before continuing
+#     accelerator.wait_for_everyone()
 
-#         # Create processors - only provide dataset_stats if not resuming from saved processors
-#         processor_kwargs = {}
-#         postprocessor_kwargs = {}
-#         if (cfg.policy.pretrained_path and not cfg.resume) or not cfg.policy.pretrained_path:
-#             # Only provide dataset_stats when not resuming from saved processor state
-#             processor_kwargs["dataset_stats"] = dataset.meta.stats
+#     # Create processors - only provide dataset_stats if not resuming from saved processors
+#     processor_kwargs = {}
+#     postprocessor_kwargs = {}
+#     if (cfg.policy.pretrained_path and not cfg.resume) or not cfg.policy.pretrained_path:
+#         # Only provide dataset_stats when not resuming from saved processor state
+#         processor_kwargs["dataset_stats"] = dataset.meta.stats
 
-#         if cfg.policy.pretrained_path is not None:
-#             processor_kwargs["preprocessor_overrides"] = {
-#                 "device_processor": {"device": device.type},
-#                 "normalizer_processor": {
-#                     "stats": dataset.meta.stats,
-#                     "features": {**policy.config.input_features, **policy.config.output_features},
-#                     "norm_map": policy.config.normalization_mapping,
-#                 },
-#             }
-#             processor_kwargs["preprocessor_overrides"]["rename_observations_processor"] = {
-#                 "rename_map": cfg.rename_map
-#             }
-#             postprocessor_kwargs["postprocessor_overrides"] = {
-#                 "unnormalizer_processor": {
-#                     "stats": dataset.meta.stats,
-#                     "features": policy.config.output_features,
-#                     "norm_map": policy.config.normalization_mapping,
-#                 },
-#             }
-
-#         preprocessor, postprocessor = make_pre_post_processors(
-#             policy_cfg=cfg.policy,
-#             pretrained_path=cfg.policy.pretrained_path,
-#             **processor_kwargs,
-#             **postprocessor_kwargs,
-#         )
-
-#         if is_main_process:
-#             logging.info("Creating optimizer and scheduler")
-#         optimizer, lr_scheduler = make_optimizer_and_scheduler(cfg, policy)
-
-#         step = 0  # number of policy updates (forward + backward + optim)
-
-#         if cfg.resume:
-#             step, optimizer, lr_scheduler = load_training_state(cfg.checkpoint_path, optimizer, lr_scheduler)
-
-#         num_learnable_params = sum(p.numel() for p in policy.parameters() if p.requires_grad)
-#         num_total_params = sum(p.numel() for p in policy.parameters())
-
-#         if is_main_process:
-#             logging.info(colored("Output dir:", "yellow", attrs=["bold"]) + f" {cfg.output_dir}")
-#             if cfg.env is not None:
-#                 logging.info(f"{cfg.env.task=}")
-#             logging.info(f"{cfg.steps=} ({format_big_number(cfg.steps)})")
-#             logging.info(f"{dataset.num_frames=} ({format_big_number(dataset.num_frames)})")
-#             logging.info(f"{dataset.num_episodes=}")
-#             num_processes = accelerator.num_processes
-#             effective_bs = cfg.batch_size * num_processes
-#             logging.info(f"Effective batch size: {cfg.batch_size} x {num_processes} = {effective_bs}")
-#             logging.info(f"{num_learnable_params=} ({format_big_number(num_learnable_params)})")
-#             logging.info(f"{num_total_params=} ({format_big_number(num_total_params)})")
-
-#         # create dataloader for offline training
-#         if hasattr(cfg.policy, "drop_n_last_frames"):
-#             shuffle = False
-#             sampler = EpisodeAwareSampler(
-#                 dataset.meta.episodes["dataset_from_index"],
-#                 dataset.meta.episodes["dataset_to_index"],
-#                 drop_n_last_frames=cfg.policy.drop_n_last_frames,
-#                 shuffle=True,
-#             )
-#         else:
-#             shuffle = True
-#             sampler = None
-
-#         dataloader = torch.utils.data.DataLoader(
-#             dataset,
-#             num_workers=cfg.num_workers,
-#             batch_size=cfg.batch_size,
-#             shuffle=shuffle and not cfg.dataset.streaming,
-#             sampler=sampler,
-#             pin_memory=device.type == "cuda",
-#             drop_last=False,
-#             prefetch_factor=2 if cfg.num_workers > 0 else None,
-#         )
-
-#         # Prepare everything with accelerator
-#         accelerator.wait_for_everyone()
-#         policy, optimizer, dataloader, lr_scheduler = accelerator.prepare(
-#             policy, optimizer, dataloader, lr_scheduler
-#         )
-#         dl_iter = cycle(dataloader)
-
-#         policy.train()
-
-#         train_metrics = {
-#             "loss": AverageMeter("loss", ":.3f"),
-#             "grad_norm": AverageMeter("grdn", ":.3f"),
-#             "lr": AverageMeter("lr", ":0.1e"),
-#             "update_s": AverageMeter("updt_s", ":.3f"),
-#             "dataloading_s": AverageMeter("data_s", ":.3f"),
+#     if cfg.policy.pretrained_path is not None:
+#         processor_kwargs["preprocessor_overrides"] = {
+#             "device_processor": {"device": device.type},
+#             "normalizer_processor": {
+#                 "stats": dataset.meta.stats,
+#                 "features": {**policy.config.input_features, **policy.config.output_features},
+#                 "norm_map": policy.config.normalization_mapping,
+#             },
+#         }
+#         processor_kwargs["preprocessor_overrides"]["rename_observations_processor"] = {
+#             "rename_map": cfg.rename_map
+#         }
+#         postprocessor_kwargs["postprocessor_overrides"] = {
+#             "unnormalizer_processor": {
+#                 "stats": dataset.meta.stats,
+#                 "features": policy.config.output_features,
+#                 "norm_map": policy.config.normalization_mapping,
+#             },
 #         }
 
-#         # Use effective batch size for proper epoch calculation in distributed training
-#         effective_batch_size = cfg.batch_size * accelerator.num_processes
-#         train_tracker = MetricsTracker(
-#             effective_batch_size,
-#             dataset.num_frames,
-#             dataset.num_episodes,
-#             train_metrics,
-#             initial_step=step,
-#             accelerator=accelerator,
+#     preprocessor, postprocessor = make_pre_post_processors(
+#         policy_cfg=cfg.policy,
+#         pretrained_path=cfg.policy.pretrained_path,
+#         **processor_kwargs,
+#         **postprocessor_kwargs,
+#     )
+
+#     if is_main_process:
+#         logging.info("Creating optimizer and scheduler")
+#     optimizer, lr_scheduler = make_optimizer_and_scheduler(cfg, policy)
+
+#     step = 0  # number of policy updates (forward + backward + optim)
+
+#     if cfg.resume:
+#         step, optimizer, lr_scheduler = load_training_state(cfg.checkpoint_path, optimizer, lr_scheduler)
+
+#     num_learnable_params = sum(p.numel() for p in policy.parameters() if p.requires_grad)
+#     num_total_params = sum(p.numel() for p in policy.parameters())
+
+#     if is_main_process:
+#         logging.info(colored("Output dir:", "yellow", attrs=["bold"]) + f" {cfg.output_dir}")
+#         if cfg.env is not None:
+#             logging.info(f"{cfg.env.task=}")
+#         logging.info(f"{cfg.steps=} ({format_big_number(cfg.steps)})")
+#         logging.info(f"{dataset.num_frames=} ({format_big_number(dataset.num_frames)})")
+#         logging.info(f"{dataset.num_episodes=}")
+#         num_processes = accelerator.num_processes
+#         effective_bs = cfg.batch_size * num_processes
+#         logging.info(f"Effective batch size: {cfg.batch_size} x {num_processes} = {effective_bs}")
+#         logging.info(f"{num_learnable_params=} ({format_big_number(num_learnable_params)})")
+#         logging.info(f"{num_total_params=} ({format_big_number(num_total_params)})")
+
+#     # create dataloader for offline training
+#     if hasattr(cfg.policy, "drop_n_last_frames"):
+#         shuffle = False
+#         sampler = EpisodeAwareSampler(
+#             dataset.meta.episodes["dataset_from_index"],
+#             dataset.meta.episodes["dataset_to_index"],
+#             drop_n_last_frames=cfg.policy.drop_n_last_frames,
+#             shuffle=True,
 #         )
+#     else:
+#         shuffle = True
+#         sampler = None
 
-#         if is_main_process:
-#             logging.info("Start offline training on a fixed dataset")
+#     dataloader = torch.utils.data.DataLoader(
+#         dataset,
+#         num_workers=cfg.num_workers,
+#         batch_size=cfg.batch_size,
+#         shuffle=shuffle and not cfg.dataset.streaming,
+#         sampler=sampler,
+#         pin_memory=device.type == "cuda",
+#         drop_last=False,
+#         prefetch_factor=2 if cfg.num_workers > 0 else None,
+#     )
 
-#         # Initialize progress bar only on main process
-#         progress_bar = tqdm(
-#             total=cfg.steps,
-#             initial=step,
-#             desc="Training",
-#             disable=not is_main_process,
-#             leave=True,
-#             dynamic_ncols=True,
-#         )
+#     # Prepare everything with accelerator
+#     accelerator.wait_for_everyone()
+#     policy, optimizer, dataloader, lr_scheduler = accelerator.prepare(
+#         policy, optimizer, dataloader, lr_scheduler
+#     )
+#     dl_iter = cycle(dataloader)
+
+#     policy.train()
+
+#     train_metrics = {
+#         "loss": AverageMeter("loss", ":.3f"),
+#         "grad_norm": AverageMeter("grdn", ":.3f"),
+#         "lr": AverageMeter("lr", ":0.1e"),
+#         "update_s": AverageMeter("updt_s", ":.3f"),
+#         "dataloading_s": AverageMeter("data_s", ":.3f"),
+#     }
+
+#     # Use effective batch size for proper epoch calculation in distributed training
+#     effective_batch_size = cfg.batch_size * accelerator.num_processes
+#     train_tracker = MetricsTracker(
+#         effective_batch_size,
+#         dataset.num_frames,
+#         dataset.num_episodes,
+#         train_metrics,
+#         initial_step=step,
+#         accelerator=accelerator,
+#     )
+
+#     if is_main_process:
+#         logging.info("Start offline training on a fixed dataset")
+
+#     # Initialize progress bar only on main process
+#     progress_bar = tqdm(
+#         total=cfg.steps,
+#         initial=step,
+#         desc="Training",
+#         disable=not is_main_process,
+#         leave=True,
+#         dynamic_ncols=True,
+#     )
 
 
-#         start_time = time.perf_counter()
-#         batch = next(dl_iter)
-#         batch = preprocessor(batch)
-#         train_tracker.dataloading_s = time.perf_counter() - start_time
+#     start_time = time.perf_counter()
+#     batch = next(dl_iter)
+#     batch = preprocessor(batch)
+#     train_tracker.dataloading_s = time.perf_counter() - start_time
 
-#         train_tracker, output_dict = update_policy(
-#             train_tracker,
-#             policy,
-#             batch,
-#             optimizer,
-#             cfg.optimizer.grad_clip_norm,
-#             accelerator=accelerator,
-#             lr_scheduler=lr_scheduler,
-#         )
+#     train_tracker, output_dict = update_policy(
+#         train_tracker,
+#         policy,
+#         batch,
+#         optimizer,
+#         cfg.optimizer.grad_clip_norm,
+#         accelerator=accelerator,
+#         lr_scheduler=lr_scheduler,
+#     )
 
-#     return
+#     # return
 
 
 #     with torch_npu.profiler.profile(
@@ -744,14 +754,15 @@ def train(cfg: TrainPipelineConfig, accelerator: Accelerator | None = None):
 #         torch_npu.profiler.ProfilerActivity.CPU,
 #         torch_npu.profiler.ProfilerActivity.NPU
 #         ],
-#     schedule=torch_npu.profiler.schedule(wait=0, warmup=17, active=3),
-#     on_trace_ready=torch_npu.profiler.tensorboard_trace_handler("./profiling"),
+#     schedule=torch_npu.profiler.schedule(wait=12, warmup=5, active=3),
+#     on_trace_ready=torch_npu.profiler.tensorboard_trace_handler("./profiling_test"),
 #     record_shapes=True,
 #     profile_memory=True,
-#     with_stack=True,
+#     # with_stack=True,
 #     with_modules=True,
 #     with_flops=True,
-#     experimental_config=experimental_config) as prof:
+#     experimental_config=experimental_config
+#     ) as prof:
 #         while step < cfg.steps:
 #             start_time = time.perf_counter()
 #             batch = next(dl_iter)
@@ -877,6 +888,8 @@ def train(cfg: TrainPipelineConfig, accelerator: Accelerator | None = None):
 
 
 def main():
+    # torch_npu.npu.set_aoe("/data/zzx/workspace/dump")
+    # torch_npu.npu.set_compile_mode(jit_compile=True)
     train()
 
 

@@ -5,10 +5,8 @@ dataset:
 
 policy:
   type: pi0fast
-  chunk_size: 10
-  n_action_steps: 10
 
-  # device: npu  # 使用昇腾NPU
+  device: npu  # 使用昇腾NPU
   push_to_hub: false
 
 save_checkpoint: true

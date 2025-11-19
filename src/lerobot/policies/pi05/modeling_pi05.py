@@ -372,15 +372,86 @@ class PaliGemmaWithExpertModel(
 
         self.to_bfloat16_for_selected_params(precision)
 
-    def to_bfloat16_for_selected_params(self, precision: Literal["bfloat16", "float32"] = "bfloat16"):
-        if precision == "bfloat16":
-            self.to(dtype=torch.bfloat16)
-        elif precision == "float32":
-            self.to(dtype=torch.float32)
-            return
-        else:
+    # def to_bfloat16_for_selected_params(self, precision: Literal["bfloat16", "float32"] = "bfloat16"):
+    #     if precision == "bfloat16":
+    #         self.to(dtype=torch.bfloat16)
+    #     elif precision == "float32":
+    #         self.to(dtype=torch.float32)
+    #         return
+    #     else:
+    #         raise ValueError(f"Invalid precision: {precision}")
+
+    #     params_to_keep_float32 = [
+    #         "vision_tower.vision_model.embeddings.patch_embedding.weight",
+    #         "vision_tower.vision_model.embeddings.patch_embedding.bias",
+    #         "vision_tower.vision_model.embeddings.position_embedding.weight",
+    #         "input_layernorm",
+    #         "post_attention_layernorm",
+    #         "model.norm",
+    #     ]
+
+    #     for name, param in self.named_parameters():
+    #         if any(selector in name for selector in params_to_keep_float32):
+    #             param.data = param.data.to(dtype=torch.float32)
+    
+    def to_bfloat16_for_selected_params(
+        self, precision: Literal["bfloat16", "float16", "float32"] = "bfloat16"
+    ):
+        """
+        Try to cast model to requested precision.
+        - Prefer bfloat16 when requested, but if the runtime does not support bfloat16
+        (e.g. mindtorch/Ascend lacking CPU BF16 kernels), fall back to float16.
+        - If float32 requested, keep in float32.
+        - Keep certain parameters in float32 as before.
+        """
+        # normalize requested precision
+        precision = precision.lower()
+        if precision not in ("bfloat16", "float16", "float32"):
             raise ValueError(f"Invalid precision: {precision}")
 
+        # helper to attempt casting and check whether it fails
+        def try_cast(dtype):
+            try:
+                # try a model-level cast; if this raises due to unsupported dtype,
+                # we catch below
+                self.to(dtype=dtype)
+                return True
+            except Exception as e:
+                # keep the exception for debugging/logging
+                return False
+
+        # decide target dtype
+        if precision == "float32":
+            target_dtype = torch.float32
+        elif precision == "float16":
+            target_dtype = torch.float16
+        else:  # requested "bfloat16"
+            # prefer bfloat16, but verify support
+            if try_cast(torch.bfloat16):
+                target_dtype = torch.bfloat16
+            else:
+                # fallback to float16 with a clear warning
+                # (mindtorch/Ascend often cannot handle CPU zeros for bfloat16)
+                print(
+                    "[WARN] requested bfloat16 but runtime failed to cast; "
+                    "falling back to float16. If you need true bfloat16, "
+                    "use a runtime that supports BF16 kernels."
+                )
+                target_dtype = torch.float16
+                # ensure model is in a clean dtype state before final cast
+                self.to(dtype=torch.float32)
+                # now try float16; if even this fails, let the exception propagate
+                if not try_cast(torch.float16):
+                    raise RuntimeError("Failed to cast model to float16 on this runtime.")
+
+        # If we reached here and target_dtype is not yet applied (e.g. bfloat16 path),
+        # make sure model is actually cast to it. try_cast already applied casts for
+        # bfloat16; for other paths ensure final cast.
+        if target_dtype is not torch.bfloat16:
+            # for float16/float32 path, ensure model is in target dtype
+            self.to(dtype=target_dtype)
+
+        # list of params to keep in float32 (same as your list)
         params_to_keep_float32 = [
             "vision_tower.vision_model.embeddings.patch_embedding.weight",
             "vision_tower.vision_model.embeddings.patch_embedding.bias",
@@ -390,8 +461,10 @@ class PaliGemmaWithExpertModel(
             "model.norm",
         ]
 
+        # convert selected params back to float32 (do this after global cast)
         for name, param in self.named_parameters():
             if any(selector in name for selector in params_to_keep_float32):
+                # use in-place data cast to avoid re-registration issues
                 param.data = param.data.to(dtype=torch.float32)
 
     def embed_image(self, image: torch.Tensor):

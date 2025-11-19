@@ -24,7 +24,7 @@ output_dir: ./ckpt/pi05_libero
 batch_size: 16
 # job_name: pi05_meta
 job_name: pi05_libero
-steps: 20000
+steps: 1
 eval_freq: -1  # No evaluation during distributed training
 save_checkpoint: true
 save_freq: 5_000
