@@ -5,7 +5,11 @@
 # 支持后台运行、resume模式、混合精度模式、日志管理
 # =============================================
 
-export PYTORCH_NPU_ALLOC_CONF="max_split_size_mb:32"
+# export PYTORCH_NPU_ALLOC_CONF="max_split_size_mb:32"
+export PYTORCH_NPU_ALLOC_CONF=expandable_segments:True
+export ACLNN_CACHE_LIMIT=100000
+export HOST_CACHE_CAPACITY=20
+
 
 # -------------------------
 # 获取项目根目录
