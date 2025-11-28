@@ -19,8 +19,8 @@ from typing import TYPE_CHECKING
 import torch
 import torch.nn.functional as F  # noqa: N812
 from torch import nn
-# from torch.distributions import Beta
-from .beta_stub import Beta
+from torch.distributions import Beta
+# from .beta_stub import Beta
 
 from lerobot.utils.import_utils import _transformers_available
 
