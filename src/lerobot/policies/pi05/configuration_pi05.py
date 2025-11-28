@@ -136,6 +136,7 @@ class PI05Config(PreTrainedConfig):
             eps=self.optimizer_eps,
             weight_decay=self.optimizer_weight_decay,
             grad_clip_norm=self.optimizer_grad_clip_norm,
+            # foreach=False
         )
 
     def get_scheduler_preset(self):

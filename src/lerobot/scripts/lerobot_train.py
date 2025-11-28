@@ -23,8 +23,8 @@ from typing import Any
 import torch
 import torch_npu
 from torch_npu.contrib import transfer_to_npu
-torch_npu.npu.set_aoe("/data/zzx/workspace/dump")
-torch_npu.npu.set_compile_mode(jit_compile=True)
+# torch_npu.npu.set_aoe("/data/zzx/workspace/dump")
+# torch_npu.npu.set_compile_mode(jit_compile=True)
 
 # import os
 # os.environ["CUSTOMIZED_OP_PATH"] = "/data/zzx/workspace/custom_tune_bank/Ascend910B2"
@@ -65,17 +65,48 @@ from lerobot.utils.utils import (
 )
 
 
-experimental_config = torch_npu.profiler._ExperimentalConfig(
-    export_type=torch_npu.profiler.ExportType.Text,
-    profiler_level=torch_npu.profiler.ProfilerLevel.Level2,
-    msprof_tx=False,
-    aic_metrics=torch_npu.profiler.AiCMetrics.AiCoreNone,
-    l2_cache=False,
-    op_attr=False,
-    data_simplification=False,
-    record_op_args=False,
-    gc_detect_threshold=None,
-)
+# experimental_config = torch_npu.profiler._ExperimentalConfig(
+#     export_type=torch_npu.profiler.ExportType.Text,
+#     profiler_level=torch_npu.profiler.ProfilerLevel.Level2,
+#     msprof_tx=False,
+#     aic_metrics=torch_npu.profiler.AiCMetrics.AiCoreNone,
+#     l2_cache=False,
+#     op_attr=False,
+#     data_simplification=False,
+#     record_op_args=False,
+#     gc_detect_threshold=None,
+# )
+
+
+# def safe_clip_grad_norm(params, max_norm):
+#     """Ascend-safe gradient clipping without in-place mul_."""
+#     if max_norm <= 0:
+#         # Compute norm without clipping
+#         total_norm = 0.0
+#         for p in params:
+#             if p.grad is not None:
+#                 total_norm += p.grad.norm(2).item() ** 2
+#         return total_norm**0.5
+
+#     # Step 1: Compute total L2 norm
+#     total_norm = 0.0
+#     grads = []
+#     for p in params:
+#         if p.grad is not None:
+#             grads.append(p.grad)
+#             total_norm += p.grad.norm(2).item() ** 2
+#     total_norm = total_norm**0.5
+
+#     # Step 2: Clip if needed
+#     if total_norm > max_norm:
+#         clip_coef = max_norm / (total_norm + 1e-6)
+#         for g in grads:
+#             # ⚠️ 关键：使用 out-of-place 操作 g * clip_coef，再赋值
+#             # 避免 g.mul_(clip_coef) 的 in-place 问题
+#             g.copy_(g * clip_coef)
+
+#     return total_norm
+
 
 def update_policy(
     train_metrics: MetricsTracker,
@@ -126,6 +157,7 @@ def update_policy(
         grad_norm = torch.nn.utils.clip_grad_norm_(
             policy.parameters(), float("inf"), error_if_nonfinite=False
         )
+    # grad_norm = safe_clip_grad_norm(policy.parameters(), grad_clip_norm)
 
     # Optimizer step
     with lock if lock is not None else nullcontext():
@@ -143,6 +175,7 @@ def update_policy(
 
     train_metrics.loss = loss.item()
     train_metrics.grad_norm = grad_norm.item()
+    # train_metrics.grad_norm = grad_norm
     train_metrics.lr = optimizer.param_groups[0]["lr"]
     train_metrics.update_s = time.perf_counter() - start_time
     return train_metrics, output_dict
@@ -750,20 +783,20 @@ def train(cfg: TrainPipelineConfig, accelerator: Accelerator | None = None):
 #     # return
 
 
-#     with torch_npu.profiler.profile(
-#     activities=[
-#         torch_npu.profiler.ProfilerActivity.CPU,
-#         torch_npu.profiler.ProfilerActivity.NPU
-#         ],
-#     schedule=torch_npu.profiler.schedule(wait=12, warmup=5, active=3),
-#     on_trace_ready=torch_npu.profiler.tensorboard_trace_handler("./profiling_test"),
-#     record_shapes=True,
-#     profile_memory=True,
-#     # with_stack=True,
-#     with_modules=True,
-#     with_flops=True,
-#     experimental_config=experimental_config
-#     ) as prof:
+# with torch_npu.profiler.profile(
+# activities=[
+#     torch_npu.profiler.ProfilerActivity.CPU,
+#     torch_npu.profiler.ProfilerActivity.NPU
+#     ],
+# schedule=torch_npu.profiler.schedule(wait=12, warmup=5, active=3),
+# on_trace_ready=torch_npu.profiler.tensorboard_trace_handler("./profiling_test"),
+# record_shapes=True,
+# profile_memory=True,
+# # with_stack=True,
+# with_modules=True,
+# with_flops=True,
+# experimental_config=experimental_config
+# ) as prof:
 #         while step < cfg.steps:
 #             start_time = time.perf_counter()
 #             batch = next(dl_iter)

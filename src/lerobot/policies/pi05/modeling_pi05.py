@@ -62,6 +62,8 @@ def get_safe_dtype(target_dtype, device_type):
     """Get a safe dtype for the given device type."""
     if device_type == "mps" and target_dtype == torch.float64:
         return torch.float32
+    # if device_type == "npu" and target_dtype == torch.float64:
+    #     return torch.float32  # Ascend NPU 不支持 float64
     if device_type == "cpu":
         # CPU doesn't support bfloat16, use float32 instead
         if target_dtype == torch.bfloat16:
@@ -752,7 +754,6 @@ class PI05Pytorch(nn.Module):  # see openpi `PI0Pytorch`
 
         # Set attention masks so that image, language and state inputs do not attend to action tokens
         att_masks += [1] + ([0] * (self.config.chunk_size - 1))
-
         embs = torch.cat(embs, dim=1)
         pad_masks = torch.cat(pad_masks, dim=1)
         att_masks = torch.tensor(att_masks, dtype=embs.dtype, device=embs.device)
