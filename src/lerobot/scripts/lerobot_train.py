@@ -22,6 +22,15 @@ from typing import Any
 
 import torch
 import torch_npu
+import torchair
+from torchair import patch_for_hcom
+
+patch_for_hcom()
+
+config = torchair.CompilerConfig()
+# 配置图执行模式，默认max-autotune，还支持reduce-overhead
+# config.mode = "reduce-overhead"
+npu_backend = torchair.get_npu_backend(compiler_config=config)
 from torch_npu.contrib import transfer_to_npu
 # torch_npu.npu.set_aoe("/data/zzx/workspace/dump")
 # torch_npu.npu.set_compile_mode(jit_compile=True)
@@ -269,6 +278,9 @@ def train(cfg: TrainPipelineConfig, accelerator: Accelerator | None = None):
         ds_meta=dataset.meta,
         rename_map=cfg.rename_map,
     )
+    
+    if cfg.compile:
+        policy = torch.compile(policy, backend=npu_backend)
 
     # Wait for all processes to finish policy creation before continuing
     accelerator.wait_for_everyone()

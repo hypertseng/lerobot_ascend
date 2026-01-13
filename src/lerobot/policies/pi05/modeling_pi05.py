@@ -26,6 +26,17 @@ import torch.nn.functional as F  # noqa: N812
 from torch import Tensor, nn
 from typing_extensions import Unpack
 
+import torch_npu
+import torchair
+from torchair import patch_for_hcom
+
+patch_for_hcom()
+
+config = torchair.CompilerConfig()
+# 配置图执行模式，默认max-autotune，还支持reduce-overhead
+# config.mode = "reduce-overhead"
+npu_backend = torchair.get_npu_backend(compiler_config=config)
+
 from lerobot.utils.import_utils import _transformers_available
 
 # Conditional import for type checking and lazy loading
@@ -142,6 +153,11 @@ def pad_vector(vector, new_dim):
         return vector
     return F.pad(vector, (0, new_dim - vector.shape[-1]))
 
+def apply_fused_rope(q, k, cos, sin, unsqueeze_dim=1):
+    cos = cos.unsqueeze(unsqueeze_dim)
+    sin = sin.unsqueeze(unsqueeze_dim)
+    return torch_npu.npu_rotary_mul(q, cos, sin), torch_npu.npu_rotary_mul(k, cos, sin)
+
 
 def resize_with_pad_torch(  # see openpi `resize_with_pad_torch` (exact copy)
     images: torch.Tensor,
@@ -217,6 +233,27 @@ def resize_with_pad_torch(  # see openpi `resize_with_pad_torch` (exact copy)
     return padded_images
 
 
+def fused_attention_forward(
+    module: nn.Module,
+    query_states,
+    key_states,
+    value_states,
+    attention_mask,
+    scaling,
+):
+    att_output = torch_npu.npu_prompt_flash_attention(
+        query_states,
+        key_states.contiguous(),
+        value_states.contiguous(),
+        input_layout="BSND",
+        scale_value=scaling,
+        atten_mask=attention_mask,
+        num_key_value_heads=module.num_key_value_groups,
+    )
+
+    return att_output
+
+
 # Define the complete layer computation function for gradient checkpointing
 def compute_layer_complete(
     layer_idx, inputs_embeds, attention_mask, position_ids, adarms_cond, paligemma, gemma_expert
@@ -226,9 +263,13 @@ def compute_layer_complete(
     key_states = []
     value_states = []
     gates = []
+    ones_add = torch.ones(1, dtype=torch.bfloat16, device="npu")
     for i, hidden_states in enumerate(inputs_embeds):
         layer = models[i].layers[layer_idx]
-        hidden_states, gate = layer.input_layernorm(hidden_states, cond=adarms_cond[i])  # noqa: PLW2901
+        # hidden_states, gate = layer.input_layernorm(hidden_states, cond=adarms_cond[i])  # noqa: PLW2901
+        hidden_states = torch_npu.npu_rms_norm(
+            hidden_states, layer.input_layernorm.weight.add(ones_add), 1e-6
+        )[0]
         gates.append(gate)
         input_shape = hidden_states.shape[:-1]
         hidden_shape = (*input_shape, -1, layer.self_attn.head_dim)
@@ -250,13 +291,22 @@ def compute_layer_complete(
         dtype=query_states.dtype,
     )
     cos, sin = paligemma.model.language_model.rotary_emb(dummy_tensor, position_ids)
-    query_states, key_states = modeling_gemma.apply_rotary_pos_emb(
-        query_states, key_states, cos, sin, unsqueeze_dim=1
-    )
+    # query_states, key_states = modeling_gemma.apply_rotary_pos_emb(
+    #     query_states, key_states, cos, sin, unsqueeze_dim=1
+    # )
+    query_states, key_states = apply_fused_rope(query_states, key_states, cos, sin, unsqueeze_dim=1)
     batch_size = query_states.shape[0]
     scaling = paligemma.language_model.layers[layer_idx].self_attn.scaling
     # Attention computation
-    att_output, _ = modeling_gemma.eager_attention_forward(
+    # att_output, _ = modeling_gemma.eager_attention_forward(
+    #     paligemma.language_model.layers[layer_idx].self_attn,
+    #     query_states,
+    #     key_states,
+    #     value_states,
+    #     attention_mask,
+    #     scaling,
+    # )
+    att_output, _ = fused_attention_forward(
         paligemma.language_model.layers[layer_idx].self_attn,
         query_states,
         key_states,
@@ -280,6 +330,12 @@ def compute_layer_complete(
         out_emb = modeling_gemma._gated_residual(hidden_states, out_emb, gates[i])  # noqa: SLF001
         after_first_residual = out_emb.clone()
         out_emb, gate = layer.post_attention_layernorm(out_emb, cond=adarms_cond[i])
+        # out_emb, _, after_first_residual = torch_npu.npu_add_rms_norm(
+        #     out_emb.clone(),
+        #     hidden_states.to(torch.bfloat16),
+        #     layer.post_attention_layernorm.weight.add(ones_add),
+        #     1e-6,
+        # )
         # Convert to bfloat16 if the next layer (mlp) uses bfloat16
         if layer.mlp.up_proj.weight.dtype == torch.bfloat16:
             out_emb = out_emb.to(dtype=torch.bfloat16)
@@ -612,7 +668,7 @@ class PI05Pytorch(nn.Module):  # see openpi `PI0Pytorch`
         # Compile model if requested
         if config.compile_model:
             torch.set_float32_matmul_precision("high")
-            self.sample_actions = torch.compile(self.sample_actions, mode=config.compile_mode)
+            self.sample_actions = torch.compile(self.sample_actions, backend=npu_backend)
 
         msg = """An incorrect transformer version is used, please create an issue on https://github.com/huggingface/lerobot/issues"""
 
