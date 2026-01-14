@@ -88,6 +88,7 @@ from lerobot.policies.factory import make_policy, make_pre_post_processors
 from lerobot.policies.pretrained import PreTrainedPolicy
 from lerobot.processor import PolicyAction, PolicyProcessorPipeline
 from lerobot.utils.constants import ACTION, DONE, OBS_STR, REWARD
+from lerobot.utils.import_utils import register_third_party_plugins
 from lerobot.utils.io_utils import write_video
 from lerobot.utils.random_utils import set_seed
 from lerobot.utils.utils import (
@@ -183,9 +184,9 @@ def rollout(
             action = policy.select_action(observation)
         action = postprocessor(action)
 
-        action_transition = {"action": action}
+        action_transition = {ACTION: action}
         action_transition = env_postprocessor(action_transition)
-        action = action_transition["action"]
+        action = action_transition[ACTION]
 
         # Convert to CPU / numpy.
         action_numpy: np.ndarray = action.to("cpu").numpy()
@@ -284,9 +285,16 @@ def eval_policy(
         raise ValueError("If max_episodes_rendered > 0, videos_dir must be provided.")
 
     if not isinstance(policy, PreTrainedPolicy):
-        raise ValueError(
+        exc = ValueError(
             f"Policy of type 'PreTrainedPolicy' is expected, but type '{type(policy)}' was provided."
         )
+        try:
+            from peft import PeftModel
+
+            if not isinstance(policy, PeftModel):
+                raise exc
+        except ImportError:
+            raise exc from None
 
     start = time.time()
     policy.eval()
@@ -512,7 +520,12 @@ def eval_main(cfg: EvalPipelineConfig):
     logging.info(colored("Output dir:", "yellow", attrs=["bold"]) + f" {cfg.output_dir}")
     
     logging.info("Making environment.")
-    envs = make_env(cfg.env, n_envs=cfg.eval.batch_size, use_async_envs=cfg.eval.use_async_envs)
+    envs = make_env(
+        cfg.env,
+        n_envs=cfg.eval.batch_size,
+        use_async_envs=cfg.eval.use_async_envs,
+        trust_remote_code=cfg.trust_remote_code,
+    )
 
     logging.info("Making policy.")
     
@@ -537,7 +550,7 @@ def eval_main(cfg: EvalPipelineConfig):
     )
 
     # Create environment-specific preprocessor and postprocessor (e.g., for LIBERO environments)
-    env_preprocessor, env_postprocessor = make_env_pre_post_processors(env_cfg=cfg.env)
+    env_preprocessor, env_postprocessor = make_env_pre_post_processors(env_cfg=cfg.env, policy_cfg=cfg.policy)
 
     with torch.no_grad(), torch.autocast(device_type=device.type) if cfg.policy.use_amp else nullcontext():
         info = eval_policy_all(
@@ -797,6 +810,7 @@ def eval_policy_all(
 
 def main():
     init_logging()
+    register_third_party_plugins()
     eval_main()
 
 
